@@ -139,3 +139,14 @@ docs/
 # pnpm
 typescript/.pnpm-store
 typescript/.pnp.*
+
+# === Fork-local additions (this fork only; not for upstream PRs) ===
+# Secrets — never commit (build + mock-test only; no real keys needed)
+**/.env.*
+**/cdp_api_key*
+**/cdp_wallet_secret*
+**/*wallet_secret*
+**/*.key
+# Claude Code: commit shared settings.json, ignore local/personal state
+.claude/settings.local.json
+.claude/*.local.json
