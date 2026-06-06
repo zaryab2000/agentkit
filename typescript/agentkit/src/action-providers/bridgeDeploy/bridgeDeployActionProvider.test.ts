@@ -212,6 +212,62 @@ describe("Bridge Deploy Action Provider", () => {
       expect(JSON.parse(response).status).toEqual("refunded");
       expect(response).toContain("refunded");
     });
+
+    it("instructs a manual deploy when filled with no pending record", async () => {
+      // No prior bridge_and_deploy, so nothing is recorded for this deposit.
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "filled",
+          fillTx: "0xfillTxHash",
+          originChainId: 10,
+          destinationChainId: 8453,
+        }),
+      });
+
+      const response = await actionProvider.bridgeDeployStatus(mockWallet, {
+        depositId: "999999",
+        originChainId: "10",
+      });
+      const parsed = JSON.parse(response);
+
+      expect(parsed.status).toEqual("filled");
+      expect(response).toContain("deploy_on_destination");
+    });
+
+    it("keeps the pending deploy for retry when the supply fails", async () => {
+      // Record a pending deploy, then make the destination balance zero so the
+      // auto-supply errors and the pending entry is retained.
+      await actionProvider.bridgeAndDeploy(mockWallet, bridgeArgs);
+      mockWallet.readContract = jest.fn().mockImplementation(({ functionName }) => {
+        if (functionName === "decimals") return Promise.resolve(6);
+        return Promise.resolve(BigInt("0"));
+      });
+
+      (global.fetch as jest.Mock).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          status: "filled",
+          fillTx: "0xfillTxHash",
+          originChainId: 10,
+          destinationChainId: 8453,
+        }),
+      });
+
+      const first = await actionProvider.bridgeDeployStatus(mockWallet, {
+        depositId: "123456",
+        originChainId: "10",
+      });
+      expect(JSON.parse(first).deploy).toContain("insufficient balance");
+
+      // Pending was retained: a retry attempts the supply again (not the
+      // "no pending record" fallback).
+      const second = await actionProvider.bridgeDeployStatus(mockWallet, {
+        depositId: "123456",
+        originChainId: "10",
+      });
+      expect(JSON.parse(second).deploy).toContain("insufficient balance");
+    });
   });
 
   describe("deploy_on_destination", () => {

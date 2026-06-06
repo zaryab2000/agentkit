@@ -43,6 +43,17 @@ export interface BridgeDeployActionProviderConfig {
  */
 export class BridgeDeployActionProvider extends ActionProvider<EvmWalletProvider> {
   #privateKey: string;
+  /**
+   * In-memory record of pending destination supplies, keyed by deposit, so that
+   * bridge_deploy_status can auto-run the supply once a bridge fills.
+   *
+   * NOTE: this state is instance-local and NOT durable. It is lost if the
+   * provider is re-instantiated (e.g. between agent sessions or process
+   * restarts), and a bridge can take up to ~an hour to fill. The SAME provider
+   * instance must be reused across bridge_and_deploy → bridge_deploy_status for
+   * the auto-supply to fire. If the record is gone, bridge_deploy_status falls
+   * back to instructing the caller to run deploy_on_destination manually.
+   */
   #pendingDeploys: Map<string, PendingDeploy> = new Map();
 
   /**
@@ -187,7 +198,9 @@ Behavior:
           );
         }
 
-        const deployResult = await deployToProtocol(walletProvider, pending);
+        // allowPartial: supply whatever actually landed if the fill came in
+        // under the recorded quote.
+        const deployResult = await deployToProtocol(walletProvider, pending, true);
         if (deployResult.startsWith("Error")) {
           // Keep the pending deploy so it can be retried.
           return JSON.stringify(
@@ -245,14 +258,14 @@ Behavior:
 Supplies an already-bridged token into a destination lending/vault position. Use this as the explicit second leg of a bridge, or standalone when funds are already on the destination chain.
 
 It takes:
-- token: The token address (already bridged) to supply on the destination chain
+- token: The destination-chain ERC-20 token ADDRESS (e.g. '0x833...') to supply — NOT the token symbol. Unlike bridge_and_deploy (which takes a symbol), this action requires the on-chain address.
 - amount: The amount to supply in whole units
 - protocol: 'compound' (Comet market) or 'morpho' (MetaMorpho vault)
 - protocolMarketAddress: The Comet market or Morpho vault address to supply into
 - chainId: (Optional) The destination chain ID (defaults to Base '8453')
 - recipient: (Optional) The position owner (defaults to the sender)
 
-It performs a balance preflight before supplying, so it is safe to retry if the bridge has not yet filled.
+It performs a balance preflight before supplying, so it is safe to retry if the bridge has not yet filled. It supplies the exact amount requested and errors if the balance is short.
 `,
     schema: DeployOnDestinationSchema,
   })

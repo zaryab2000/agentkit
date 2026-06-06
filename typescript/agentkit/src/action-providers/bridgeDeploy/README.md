@@ -20,6 +20,18 @@ bridge-then-deploy is **inherently TWO-STEP and NON-ATOMIC**:
 3. **Deploy** — once the bridge is `filled`, the recorded destination supply
    runs automatically (or call `deploy_on_destination` explicitly).
 
+### ⚠️ Pending-supply state is in-memory only
+
+When `bridge_and_deploy` runs, it records the intended destination supply in an
+**in-memory map on the provider instance** so `bridge_deploy_status` can fire it
+automatically once the bridge fills. This state is **not durable**: it is lost if
+the provider is re-instantiated (between agent sessions, or on a process
+restart), and a bridge can take up to ~an hour to fill. **The same provider
+instance must be reused** across the `bridge_and_deploy` → `bridge_deploy_status`
+calls for the auto-supply to fire. If the record is gone, `bridge_deploy_status`
+falls back to telling you to run `deploy_on_destination` manually — no funds are
+lost, but the second leg becomes a manual step.
+
 This provider is **honest about that**: `bridge_and_deploy` never claims the
 supply has completed, and the destination supply only runs once funds have
 landed. Because the flow is non-atomic, a bridge can succeed while the
@@ -59,12 +71,18 @@ a refund warning if the bridge was refunded.
 Supplies an already-bridged token into a destination position. Usable as the
 explicit second leg or standalone.
 
-- `token` — token **address** on the destination chain
+- `token` — the destination-chain ERC-20 token **address** (e.g. `0x833...`),
+  **not** the symbol. (`bridge_and_deploy` takes a symbol; this action takes an
+  address.)
 - `amount` — amount in whole units
 - `protocol` — `compound` or `morpho`
 - `protocolMarketAddress` — Comet market or Morpho vault address
 - `chainId` — (optional) destination chain ID (defaults to Base `8453`)
-- `recipient` — (optional) position owner (defaults to sender)
+- `recipient` — (optional) position owner (defaults to sender). For Compound
+  this uses `supplyTo` so the position is credited to `recipient`, not the sender.
+
+Unlike the auto-deploy path, this action supplies the **exact** amount requested
+and errors if the on-chain balance is short.
 
 ## Supported networks
 

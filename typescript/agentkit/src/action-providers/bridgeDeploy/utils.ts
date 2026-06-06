@@ -179,9 +179,10 @@ export async function initiateAcrossDeposit(
   const formattedInput = formatUnits(quote.deposit.inputAmount, decimals);
   const formattedOutput = formatUnits(quote.deposit.outputAmount, decimals);
 
-  // Slippage check (basis points)
-  const slippageBps =
-    ((Number(formattedInput) - Number(formattedOutput)) / Number(formattedInput)) * 10000;
+  // Slippage check (basis points) — computed with bigint to avoid float rounding.
+  const slippageBps = Number(
+    ((quote.deposit.inputAmount - quote.deposit.outputAmount) * 10000n) / quote.deposit.inputAmount,
+  );
   if (slippageBps > params.maxSlippageBps) {
     throw new Error(
       `Bridge slippage of ${slippageBps.toFixed(0)} bps exceeds the maximum allowed ${params.maxSlippageBps} bps. Input: ${formattedInput} ${params.tokenSymbol}, Output: ${formattedOutput} ${params.tokenSymbol}`,
@@ -252,10 +253,10 @@ export async function getDepositStatus(
   originChainId: number,
   depositId: string,
 ): Promise<DepositStatus> {
-  const response = await fetch(
-    `${ACROSS_DEPOSIT_STATUS_API}?originChainId=${originChainId}&depositId=${depositId}`,
-    { method: "GET" },
-  );
+  const url = new URL(ACROSS_DEPOSIT_STATUS_API);
+  url.searchParams.set("originChainId", String(originChainId));
+  url.searchParams.set("depositId", depositId);
+  const response = await fetch(url.toString(), { method: "GET" });
 
   if (!response.ok) {
     throw new Error(`Across API request failed with status ${response.status}`);
@@ -292,11 +293,17 @@ export interface PendingDeploy {
  *
  * @param walletProvider - The wallet provider executing the supply.
  * @param params - The deploy parameters.
+ * @param allowPartial - When true (auto-deploy after a bridge fill), supplies
+ *   the amount that actually landed if the fill came in under the recorded
+ *   quote, rather than failing the preflight. When false (an explicit
+ *   deploy_on_destination call), the caller asked for an exact amount, so a
+ *   short balance is an error.
  * @returns A human-readable summary including the supply transaction hash.
  */
 export async function deployToProtocol(
   walletProvider: EvmWalletProvider,
   params: PendingDeploy,
+  allowPartial = false,
 ): Promise<string> {
   if (!isSupportedDestinationChain(params.chainId)) {
     return `Error: destination protocol deployment is only supported on Base (chain IDs ${SUPPORTED_DESTINATION_CHAIN_IDS.join(", ")}), not chain ${params.chainId}`;
@@ -311,7 +318,7 @@ export async function deployToProtocol(
     functionName: "decimals",
     args: [],
   })) as number;
-  const atomicAmount = parseUnits(params.amount, decimals);
+  const requestedAmount = parseUnits(params.amount, decimals);
 
   const balance = (await walletProvider.readContract({
     address: token,
@@ -319,9 +326,19 @@ export async function deployToProtocol(
     functionName: "balanceOf",
     args: [walletProvider.getAddress() as Hex],
   })) as bigint;
-  if (balance < atomicAmount) {
-    return `Error: insufficient balance on destination chain to supply ${params.amount}. Available: ${formatUnits(balance, decimals)}. The bridge may not have filled yet — call bridge_deploy_status and retry once 'filled'.`;
+
+  // The recorded amount is the *quoted* bridge output; the actual fill can come
+  // in slightly under (fees change between quote and fill). For the auto-deploy
+  // path, supply whatever landed; for an explicit call, require the full amount.
+  let atomicAmount = requestedAmount;
+  if (balance < requestedAmount) {
+    if (allowPartial && balance > 0n) {
+      atomicAmount = balance;
+    } else {
+      return `Error: insufficient balance on destination chain to supply ${params.amount}. Available: ${formatUnits(balance, decimals)}. The bridge may not have filled yet — call bridge_deploy_status and retry once 'filled'.`;
+    }
   }
+  const suppliedAmount = formatUnits(atomicAmount, decimals);
 
   // Approve the destination market to pull the token
   const approvalResult = await approve(
@@ -334,13 +351,14 @@ export async function deployToProtocol(
     return `Error approving ${params.protocol} market as spender: ${approvalResult}`;
   }
 
-  // Encode + submit the protocol-specific supply
+  // Encode + submit the protocol-specific supply. Compound's `supply` credits
+  // msg.sender, so `supplyTo` is used to honor an explicit recipient.
   let data: Hex;
   if (params.protocol === "compound") {
     data = encodeFunctionData({
       abi: COMET_SUPPLY_ABI,
-      functionName: "supply",
-      args: [token, atomicAmount],
+      functionName: "supplyTo",
+      args: [params.recipient, token, atomicAmount],
     });
   } else {
     data = encodeFunctionData({
@@ -356,5 +374,5 @@ export async function deployToProtocol(
   });
   await walletProvider.waitForTransactionReceipt(txHash);
 
-  return `Supplied ${params.amount} of token ${params.token} into ${params.protocol} market ${params.protocolMarketAddress} on chain ${params.chainId}. Transaction hash: ${txHash}`;
+  return `Supplied ${suppliedAmount} of token ${params.token} into ${params.protocol} market ${params.protocolMarketAddress} on chain ${params.chainId} for ${params.recipient}. Transaction hash: ${txHash}`;
 }
