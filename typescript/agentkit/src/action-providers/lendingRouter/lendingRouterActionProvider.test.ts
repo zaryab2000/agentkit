@@ -4,7 +4,7 @@ import {
 } from "./lendingRouterActionProvider";
 import { EvmWalletProvider } from "../../wallet-providers";
 import { Network } from "../../network";
-import { COMPOUND_COMET_ADDRESS, AAVE_POOL_ADDRESS } from "./constants";
+import { COMPOUND_COMET_ADDRESSES, AAVE_POOL_ADDRESS } from "./constants";
 
 const MOCK_TX_HASH = "0xmocktxhash1234567890abcdef" as `0x${string}`;
 const MOCK_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678" as `0x${string}`;
@@ -43,10 +43,17 @@ function createMockWallet(): jest.Mocked<EvmWalletProvider> {
  *
  * @param wallet - The mocked wallet to configure.
  */
+const COMPOUND_COMET_ADDRESS_SET = new Set(Object.values(COMPOUND_COMET_ADDRESSES));
+
+/**
+ * Configures mock readContract responses for Compound III.
+ *
+ * @param wallet - The mocked wallet to configure.
+ */
 function setupCompoundRateMocks(wallet: jest.Mocked<EvmWalletProvider>) {
   const impl = wallet.readContract as jest.Mock;
   impl.mockImplementation(async (params: { address: string; functionName: string }) => {
-    if (params.address === COMPOUND_COMET_ADDRESS) {
+    if (COMPOUND_COMET_ADDRESS_SET.has(params.address as `0x${string}`)) {
       if (params.functionName === "getUtilization") return 500000000000000000n;
       if (params.functionName === "getSupplyRate") return 1000000000n;
       if (params.functionName === "getBorrowRate") return 2000000000n;
@@ -442,6 +449,18 @@ describe("LendingRouterActionProvider", () => {
       setupAaveRateMocks(mockWallet);
       fetchMock.mockResolvedValue({ ok: false, status: 500 });
 
+      const impl = mockWallet.readContract as jest.Mock;
+      const prevImpl = impl.getMockImplementation();
+      impl.mockImplementation(
+        async (params: { address: string; functionName: string; args?: unknown[] }) => {
+          if (params.functionName === "getAccountLiquidity") return [0n, 0n, 0n];
+          if (params.functionName === "balanceOfUnderlying") return 0n;
+          if (params.functionName === "borrowBalanceCurrent") return 0n;
+          if (prevImpl) return prevImpl(params);
+          return 0n;
+        },
+      );
+
       const result = await provider.rebalance(mockWallet, {
         asset: "USDC",
         minApyImprovementBps: 1,
@@ -452,7 +471,7 @@ describe("LendingRouterActionProvider", () => {
 
     it("should return no-op when improvement is below threshold", async () => {
       (mockWallet.readContract as jest.Mock).mockImplementation(
-        async (params: { address: string; functionName: string }) => {
+        async (params: { address: string; functionName: string; args?: unknown[] }) => {
           if (params.functionName === "getUtilization") return 500000000000000000n;
           if (params.functionName === "getSupplyRate") return 1000000000n;
           if (params.address === AAVE_POOL_ADDRESS && params.functionName === "getReserveData") {
@@ -474,6 +493,27 @@ describe("LendingRouterActionProvider", () => {
               isolationModeTotalDebt: 0n,
             };
           }
+          if (
+            params.address === AAVE_POOL_ADDRESS &&
+            params.functionName === "getUserAccountData"
+          ) {
+            return [
+              1000000000000n,
+              500000000000n,
+              200000000000n,
+              8000n,
+              7500n,
+              2000000000000000000n,
+            ];
+          }
+          if (params.functionName === "borrowBalanceOf") return 0n;
+          if (params.functionName === "baseToken")
+            return "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+          if (params.functionName === "numAssets") return 0;
+          if (params.functionName === "collateralBalanceOf") return 0n;
+          if (params.functionName === "balanceOfUnderlying") return 0n;
+          if (params.functionName === "borrowBalanceCurrent") return 0n;
+          if (params.functionName === "getAccountLiquidity") return [0n, 0n, 0n];
           return 0n;
         },
       );
@@ -491,6 +531,18 @@ describe("LendingRouterActionProvider", () => {
       setupCompoundRateMocks(mockWallet);
       setupAaveRateMocks(mockWallet);
       fetchMock.mockResolvedValue({ ok: false, status: 500 });
+
+      const impl = mockWallet.readContract as jest.Mock;
+      const prevImpl = impl.getMockImplementation();
+      impl.mockImplementation(
+        async (params: { address: string; functionName: string; args?: unknown[] }) => {
+          if (params.functionName === "getAccountLiquidity") return [0n, 0n, 0n];
+          if (params.functionName === "balanceOfUnderlying") return 0n;
+          if (params.functionName === "borrowBalanceCurrent") return 0n;
+          if (prevImpl) return prevImpl(params);
+          return 0n;
+        },
+      );
 
       const result = await provider.rebalance(mockWallet, { asset: "USDC" });
       const parsed = JSON.parse(result);

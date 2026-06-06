@@ -6,6 +6,7 @@ import {
   MOONWELL_MTOKEN_ABI,
   MOONWELL_COMPTROLLER_ADDRESS,
   MOONWELL_COMPTROLLER_ABI,
+  MOONWELL_UNDERLYING_DECIMALS,
   SECONDS_PER_YEAR_NUMBER,
 } from "../constants";
 import { RateResult, PositionResult } from "../utils";
@@ -48,7 +49,7 @@ export async function getMoonwellRates(
   return {
     protocol: "moonwell",
     apy: apr * 100,
-    marketAddress: mToken,
+    marketId: mToken,
     source: "on-chain",
     notes: `Moonwell mToken on Base`,
   };
@@ -80,13 +81,15 @@ export async function getMoonwellPosition(
   if (shortfall > 0) {
     healthFactor = 0;
   } else if (liquidity > 0) {
-    healthFactor = 1 + liquidity;
+    // Moonwell returns USD surplus, not a ratio — store raw surplus
+    healthFactor = liquidity;
   }
 
   const supplies: Array<{ asset: string; balance: string; usdValue: number }> = [];
   const borrows: Array<{ asset: string; balance: string; usdValue: number }> = [];
 
   for (const [symbol, mToken] of Object.entries(MOONWELL_MTOKEN_ADDRESSES)) {
+    const decimals = MOONWELL_UNDERLYING_DECIMALS[symbol] ?? 18;
     try {
       const supplyBal = await wallet.readContract({
         address: mToken,
@@ -97,7 +100,7 @@ export async function getMoonwellPosition(
       if (supplyBal > 0n) {
         supplies.push({
           asset: symbol.toUpperCase(),
-          balance: formatUnits(supplyBal, 18),
+          balance: formatUnits(supplyBal, decimals),
           usdValue: 0,
         });
       }
@@ -111,7 +114,7 @@ export async function getMoonwellPosition(
       if (borrowBal > 0n) {
         borrows.push({
           asset: symbol.toUpperCase(),
-          balance: formatUnits(borrowBal, 18),
+          balance: formatUnits(borrowBal, decimals),
           usdValue: 0,
         });
       }
@@ -125,18 +128,19 @@ export async function getMoonwellPosition(
     supplies,
     borrows,
     healthFactor,
-    healthSource: error === 0 ? "Comptroller getAccountLiquidity" : "error reading liquidity",
+    healthSource:
+      error === 0 ? "Comptroller liquidity surplus (USD, not a ratio)" : "error reading liquidity",
+    healthComparable: false,
   };
 }
 
 /**
  * Encodes calldata for a Moonwell mToken mint (supply) transaction.
  *
- * @param mToken - The mToken contract address.
  * @param amount - The amount in atomic units.
  * @returns The encoded calldata.
  */
-export function encodeMoonwellMint(mToken: Address, amount: bigint): `0x${string}` {
+export function encodeMoonwellMint(amount: bigint): `0x${string}` {
   return encodeFunctionData({
     abi: MOONWELL_MTOKEN_ABI,
     functionName: "mint",

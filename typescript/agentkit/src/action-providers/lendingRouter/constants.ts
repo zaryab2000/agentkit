@@ -18,7 +18,11 @@ export const SUPPORTED_ASSETS: Record<string, Address> = {
 };
 
 // --- Compound III (Comet) on Base mainnet ---
-export const COMPOUND_COMET_ADDRESS: Address = "0xb125E6687d4313864e53df431d5425969c15Eb2F";
+// Each Comet is a separate market for one base asset
+export const COMPOUND_COMET_ADDRESSES: Record<string, Address> = {
+  usdc: "0xb125E6687d4313864e53df431d5425969c15Eb2F",
+  weth: "0x46e6b214b524310239732D51387075E0e70970bf",
+};
 
 export const COMPOUND_COMET_ABI = [
   {
@@ -236,8 +240,8 @@ export const MOONWELL_COMPTROLLER_ADDRESS: Address = "0xfBb21d0380beE3312B33c435
 export const MOONWELL_MTOKEN_ADDRESSES: Record<string, Address> = {
   usdc: "0xEdc817A28E8B93B03976FBd4a3dDBc9f7D176c22",
   weth: "0x628ff693426583D9a7FB391E54366292F509D457",
-  cbeth: "0x3bf93770f2d4a0F9a5a5F3d1a1e3a0c9B6C7E3e5",
-  cbbtc: "0xF877ACaFA28c19b96727966b8f0A3f4C4Ba4D4bD",
+  cbeth: "0x3bf93770f2d4a794c3d9EBEfBAeBAE2a8f09A5E5",
+  cbbtc: "0xF877ACaFA28c19b96727966690b2f44d35aD5976",
   wsteth: "0x627Fe393Bc6EdDA28e99AE648fD6fF362514304b",
 };
 
@@ -285,6 +289,14 @@ export const MOONWELL_MTOKEN_ABI = [
     type: "function",
   },
 ] as const;
+
+export const MOONWELL_UNDERLYING_DECIMALS: Record<string, number> = {
+  usdc: 6,
+  weth: 18,
+  cbeth: 18,
+  cbbtc: 8,
+  wsteth: 18,
+};
 
 export const MOONWELL_COMPTROLLER_ABI = [
   {

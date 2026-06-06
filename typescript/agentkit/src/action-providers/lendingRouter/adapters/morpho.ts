@@ -1,5 +1,3 @@
-import { Address } from "viem";
-
 import { EvmWalletProvider } from "../../../wallet-providers";
 import { MORPHO_GRAPHQL_ENDPOINT } from "../constants";
 import { RateResult, PositionResult } from "../utils";
@@ -87,7 +85,7 @@ export async function getMorphoRates(
     return {
       protocol: "morpho",
       apy: apy * 100,
-      marketAddress: best.uniqueKey as Address,
+      marketId: best.uniqueKey,
       source: "morpho-graphql",
       notes: `${best.loanAsset.symbol}/${best.collateralAsset?.symbol ?? "none"} market, TVL $${best.state.supplyAssetsUsd.toFixed(0)}`,
     };
@@ -105,7 +103,7 @@ export async function getMorphoRates(
  */
 export async function getMorphoPosition(
   _wallet: EvmWalletProvider,
-  _user: Address,
+  _user: string,
 ): Promise<PositionResult> {
   // Morpho Blue positions require iterating known market IDs.
   // For v1, return a minimal stub — full position tracking requires
@@ -116,5 +114,6 @@ export async function getMorphoPosition(
     borrows: [],
     healthFactor: Infinity,
     healthSource: "morpho-graphql (position data requires market enumeration)",
+    healthComparable: false,
   };
 }

@@ -1,7 +1,7 @@
 export interface RateResult {
   protocol: string;
   apy: number;
-  marketAddress: string;
+  marketId: string;
   source: string;
   notes: string;
 }
@@ -12,6 +12,7 @@ export interface PositionResult {
   borrows: Array<{ asset: string; balance: string; usdValue: number }>;
   healthFactor: number;
   healthSource: string;
+  healthComparable: boolean;
 }
 
 /**
@@ -40,7 +41,7 @@ export function findLowestHealth(positions: PositionResult[]): {
 } | null {
   let lowest: { protocol: string; healthFactor: number } | null = null;
   for (const pos of positions) {
-    if (pos.healthFactor === Infinity) continue;
+    if (pos.healthFactor === Infinity || !pos.healthComparable) continue;
     if (!lowest || pos.healthFactor < lowest.healthFactor) {
       lowest = { protocol: pos.protocol, healthFactor: pos.healthFactor };
     }

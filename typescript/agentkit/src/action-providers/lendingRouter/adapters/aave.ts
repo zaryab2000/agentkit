@@ -35,7 +35,7 @@ export async function getAaveRates(
   return {
     protocol: "aave",
     apy: apr,
-    marketAddress: AAVE_POOL_ADDRESS,
+    marketId: AAVE_POOL_ADDRESS,
     source: "on-chain",
     notes: `Aave v3 Pool on Base`,
   };
@@ -73,6 +73,7 @@ export async function getAavePosition(
       totalDebtUsd > 0 ? [{ asset: "aggregate", balance: "N/A", usdValue: totalDebtUsd }] : [],
     healthFactor: totalDebtUsd > 0 ? healthFactor : Infinity,
     healthSource: "Aave healthFactor (WAD)",
+    healthComparable: true,
   };
 }
 

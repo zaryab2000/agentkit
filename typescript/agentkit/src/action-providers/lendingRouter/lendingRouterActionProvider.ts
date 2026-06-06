@@ -17,7 +17,7 @@ import {
 import {
   SUPPORTED_ASSETS,
   ERC20_ABI,
-  COMPOUND_COMET_ADDRESS,
+  COMPOUND_COMET_ADDRESSES,
   COMPOUND_COMET_ABI,
   AAVE_POOL_ADDRESS,
   MOONWELL_MTOKEN_ADDRESSES,
@@ -240,7 +240,7 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
         args.asset,
       );
 
-      return `Supplied ${args.amount} ${args.asset} to ${chosen.protocol} at ${formatApy(chosen.apy)} APY.\nTransaction hash: ${txHash}\nMarket: ${chosen.marketAddress}`;
+      return `Supplied ${args.amount} ${args.asset} to ${chosen.protocol} at ${formatApy(chosen.apy)} APY.\nTransaction hash: ${txHash}\nMarket: ${chosen.marketId}`;
     } catch (error) {
       return `Error routing supply: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -301,6 +301,11 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
         if (position.healthFactor < HEALTH_FACTOR_THRESHOLD && position.healthFactor !== Infinity) {
           return `Error: Current Aave health factor (${position.healthFactor.toFixed(4)}) is already below the safety threshold of ${HEALTH_FACTOR_THRESHOLD}. Borrowing would be unsafe.`;
         }
+      } else if (chosen.protocol === "compound") {
+        const position = await getCompoundPosition(walletProvider, user);
+        if (position.healthFactor < HEALTH_FACTOR_THRESHOLD && position.healthFactor !== Infinity) {
+          return `Error: Current Compound health factor (${position.healthFactor.toFixed(4)}) is already below the safety threshold of ${HEALTH_FACTOR_THRESHOLD}. Borrowing would be unsafe.`;
+        }
       }
 
       const freshRate = await this.refetchRate(
@@ -360,17 +365,31 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
   ): Promise<string> {
     try {
       const minBps = args.minApyImprovementBps ?? 50;
+      const user = walletProvider.getAddress() as Address;
+
+      const [ratesSettled, positionsSettled] = await Promise.all([
+        Promise.allSettled([
+          getCompoundRates(walletProvider, args.asset, "supply"),
+          getAaveRates(walletProvider, args.asset, "supply"),
+          getMoonwellRates(walletProvider, args.asset, "supply"),
+          getMorphoRates(walletProvider, args.asset, "supply"),
+        ]),
+        Promise.allSettled([
+          getCompoundPosition(walletProvider, user),
+          getAavePosition(walletProvider, user),
+          getMoonwellPosition(walletProvider, user),
+          getMorphoPosition(walletProvider, user),
+        ]),
+      ]);
 
       const rates: RateResult[] = [];
-      const fetchers = [
-        () => getCompoundRates(walletProvider, args.asset, "supply"),
-        () => getAaveRates(walletProvider, args.asset, "supply"),
-        () => getMoonwellRates(walletProvider, args.asset, "supply"),
-        () => getMorphoRates(walletProvider, args.asset, "supply"),
-      ];
-      const settled = await Promise.allSettled(fetchers.map(f => f()));
-      for (const r of settled) {
+      for (const r of ratesSettled) {
         if (r.status === "fulfilled" && r.value) rates.push(r.value);
+      }
+
+      const positions: PositionResult[] = [];
+      for (const p of positionsSettled) {
+        if (p.status === "fulfilled") positions.push(p.value);
       }
 
       if (rates.length < 2) {
@@ -379,21 +398,40 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
 
       const ranked = rankRates(rates, "supply");
       const best = ranked[0];
-      const worst = ranked[ranked.length - 1];
 
-      const improvementBps = (best.apy - worst.apy) * 100;
+      const activeProtocols = positions.filter(
+        p =>
+          p.supplies.length > 0 &&
+          p.supplies.some(
+            s => s.asset.toLowerCase() === args.asset.toLowerCase() || s.asset === "aggregate",
+          ),
+      );
 
-      if (improvementBps < minBps) {
+      if (activeProtocols.length === 0) {
         return JSON.stringify({
           action: "no-op",
-          reason: `Best improvement is ${improvementBps.toFixed(0)} bps (${worst.protocol} → ${best.protocol}), below threshold of ${minBps} bps.`,
+          reason: `No active ${args.asset} supply positions found. Use route_supply to deposit to the best protocol (${best.protocol} at ${formatApy(best.apy)}).`,
+          rates: ranked,
+        });
+      }
+
+      const currentProtocol = activeProtocols[0].protocol;
+      const currentRate = rates.find(r => r.protocol === currentProtocol);
+      const currentApy = currentRate?.apy ?? 0;
+
+      const improvementBps = (best.apy - currentApy) * 100;
+
+      if (improvementBps < minBps || best.protocol === currentProtocol) {
+        return JSON.stringify({
+          action: "no-op",
+          reason: `Current position on ${currentProtocol} at ${formatApy(currentApy)}. Best available is ${best.protocol} at ${formatApy(best.apy)} (${improvementBps.toFixed(0)} bps improvement), below threshold of ${minBps} bps.`,
           rates: ranked,
         });
       }
 
       const plan = {
         action: "rebalance",
-        from: { protocol: worst.protocol, currentApy: formatApy(worst.apy) },
+        from: { protocol: currentProtocol, currentApy: formatApy(currentApy) },
         to: { protocol: best.protocol, targetApy: formatApy(best.apy) },
         improvementBps: Math.round(improvementBps),
         asset: args.asset,
@@ -464,14 +502,16 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
 
     switch (protocol) {
       case "compound": {
-        const approvalResult = await approve(wallet, assetAddress, COMPOUND_COMET_ADDRESS, amount);
+        const cometAddress = COMPOUND_COMET_ADDRESSES[assetSymbol.toLowerCase()];
+        if (!cometAddress) throw new Error(`No Compound Comet for ${assetSymbol}`);
+        const approvalResult = await approve(wallet, assetAddress, cometAddress, amount);
         if (approvalResult.startsWith("Error")) throw new Error(approvalResult);
         const data = encodeFunctionData({
           abi: COMPOUND_COMET_ABI,
           functionName: "supply",
           args: [assetAddress, amount],
         });
-        const txHash = await wallet.sendTransaction({ to: COMPOUND_COMET_ADDRESS, data });
+        const txHash = await wallet.sendTransaction({ to: cometAddress, data });
         await wallet.waitForTransactionReceipt(txHash);
         return txHash;
       }
@@ -488,7 +528,7 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
         if (!mToken) throw new Error(`No Moonwell mToken for ${assetSymbol}`);
         const approvalResult = await approve(wallet, assetAddress, mToken, amount);
         if (approvalResult.startsWith("Error")) throw new Error(approvalResult);
-        const data = encodeMoonwellMint(mToken, amount);
+        const data = encodeMoonwellMint(amount);
         const txHash = await wallet.sendTransaction({ to: mToken, data });
         await wallet.waitForTransactionReceipt(txHash);
         return txHash;
@@ -505,7 +545,7 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
    * @param protocol - The target protocol name.
    * @param assetAddress - The token contract address.
    * @param amount - The amount in atomic units.
-   * @param _assetSymbol - The token symbol (reserved for future use).
+   * @param assetSymbol - The token symbol for Comet lookup.
    * @returns The transaction hash.
    */
   private async executeBorrow(
@@ -513,18 +553,20 @@ export class LendingRouterActionProvider extends ActionProvider<EvmWalletProvide
     protocol: string,
     assetAddress: Address,
     amount: bigint,
-    _assetSymbol: string,
+    assetSymbol: string,
   ): Promise<string> {
     const user = wallet.getAddress() as Address;
 
     switch (protocol) {
       case "compound": {
+        const cometAddress = COMPOUND_COMET_ADDRESSES[assetSymbol.toLowerCase()];
+        if (!cometAddress) throw new Error(`No Compound Comet for ${assetSymbol}`);
         const data = encodeFunctionData({
           abi: COMPOUND_COMET_ABI,
           functionName: "withdraw",
           args: [assetAddress, amount],
         });
-        const txHash = await wallet.sendTransaction({ to: COMPOUND_COMET_ADDRESS, data });
+        const txHash = await wallet.sendTransaction({ to: cometAddress, data });
         await wallet.waitForTransactionReceipt(txHash);
         return txHash;
       }
