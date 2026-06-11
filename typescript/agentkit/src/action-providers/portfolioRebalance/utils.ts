@@ -106,17 +106,17 @@ export async function readBalances(
   tokens: TokenInfo[],
 ): Promise<Balance[]> {
   const owner = walletProvider.getAddress() as Hex;
-  const balances: Balance[] = [];
-  for (const token of tokens) {
-    const raw = (await walletProvider.readContract({
-      address: getAddress(token.address) as Hex,
-      abi: erc20Abi,
-      functionName: "balanceOf",
-      args: [owner],
-    })) as bigint;
-    balances.push({ token, raw });
-  }
-  return balances;
+  return Promise.all(
+    tokens.map(async token => ({
+      token,
+      raw: (await walletProvider.readContract({
+        address: getAddress(token.address) as Hex,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [owner],
+      })) as bigint,
+    })),
+  );
 }
 
 /**
@@ -243,7 +243,11 @@ export function planRebalance(
     const amount = Math.min(sources[i].surplusUsd, sinks[j].deficitUsd);
     if (amount > 0) {
       const fromPrice = valBySymbol.get(sources[i].symbol)?.price ?? null;
-      const estSellAmount = fromPrice && fromPrice > 0 ? (amount / fromPrice).toString() : "0";
+      let estSellAmount = "0";
+      if (fromPrice && fromPrice > 0) {
+        const fromDecimals = BASE_TOKENS[sources[i].symbol]?.decimals ?? 18;
+        estSellAmount = String(Number((amount / fromPrice).toFixed(fromDecimals)));
+      }
       swaps.push({
         from: sources[i].symbol,
         to: sinks[j].symbol,

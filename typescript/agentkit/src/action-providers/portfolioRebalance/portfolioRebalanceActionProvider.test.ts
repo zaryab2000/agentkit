@@ -160,7 +160,7 @@ describe("PortfolioRebalanceActionProvider", () => {
       expect(parsed.warnings?.[0]).toContain("AERO");
     });
 
-    it("returns an error string (not a throw) when balance reads fail", async () => {
+    it("returns a JSON error (not a throw) when balance reads fail", async () => {
       walletProvider.readContract.mockRejectedValue(new Error("rpc down"));
 
       const result = await provider.planRebalance(walletProvider, {
@@ -168,8 +168,56 @@ describe("PortfolioRebalanceActionProvider", () => {
         rebalanceThresholdBps: 100,
       });
 
-      expect(result).toContain("Error planning rebalance");
-      expect(result).toContain("rpc down");
+      const parsed = JSON.parse(result);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain("Error planning rebalance");
+      expect(parsed.error).toContain("rpc down");
+    });
+
+    it("rejects an empty targets array", async () => {
+      const result = await provider.planRebalance(walletProvider, {
+        targets: [],
+        rebalanceThresholdBps: 100,
+      });
+
+      const parsed = JSON.parse(result);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain("No target allocation");
+      expect(walletProvider.readContract).not.toHaveBeenCalled();
+    });
+
+    it("resolves targets supplied as 0x addresses", async () => {
+      mockBalances({
+        [USDC]: 5_000_000_000n,
+        [WETH]: 1_000_000_000_000_000_000n,
+      });
+      mockPrices({ [USDC]: 1, [WETH]: 2000 });
+
+      const result = await provider.planRebalance(walletProvider, {
+        targets: [
+          { token: BASE_TOKENS.USDC.address, weightBps: 7143 },
+          { token: BASE_TOKENS.WETH.address, weightBps: 2857 },
+        ],
+        rebalanceThresholdBps: 100,
+      });
+
+      const parsed = JSON.parse(result);
+      expect(parsed.success).toBe(true);
+      expect(parsed.totalUsd).toBe(7000);
+    });
+
+    it("rejects duplicate tokens in targets", async () => {
+      const result = await provider.planRebalance(walletProvider, {
+        targets: [
+          { token: "USDC", weightBps: 5000 },
+          { token: BASE_TOKENS.USDC.address, weightBps: 5000 },
+        ],
+        rebalanceThresholdBps: 100,
+      });
+
+      const parsed = JSON.parse(result);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain("Duplicate target token");
     });
   });
 

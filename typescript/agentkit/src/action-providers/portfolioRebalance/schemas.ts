@@ -16,18 +16,21 @@ export const PlanRebalanceSchema = z
           weightBps: z
             .number()
             .int()
+            .min(1)
+            .max(10000)
             .describe(
-              "Desired target weight for this token in basis points (1% = 100 bps). All target weights must sum to exactly 10000.",
+              "Desired target weight for this token in basis points (1% = 100 bps), between 1 and 10000. All target weights must sum to exactly 10000.",
             ),
         }),
       )
+      .min(1)
       .describe(
-        "The desired target portfolio allocation as a list of tokens and their weights in basis points. Weights must sum to exactly 10000 (100%).",
+        "The desired target portfolio allocation as a list of tokens and their weights in basis points. Must contain at least one token, and the weights must sum to exactly 10000 (100%).",
       ),
     rebalanceThresholdBps: z
       .number()
       .int()
-      .nullable()
+      .optional()
       .default(100)
       .describe(
         "Minimum absolute drift in basis points before a token is included in the rebalance plan. Drift smaller than this (dust) is ignored. Defaults to 100 bps (1%).",

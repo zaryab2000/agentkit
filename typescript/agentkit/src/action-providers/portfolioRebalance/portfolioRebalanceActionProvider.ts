@@ -165,7 +165,7 @@ Notes:
           : "Portfolio is within the drift threshold; no rebalance needed.",
       });
     } catch (error) {
-      return `Error planning rebalance: ${error}`;
+      return JSON.stringify({ success: false, error: `Error planning rebalance: ${error}` });
     }
   }
 
