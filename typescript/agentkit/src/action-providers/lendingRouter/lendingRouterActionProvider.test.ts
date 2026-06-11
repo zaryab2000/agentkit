@@ -4,7 +4,11 @@ import {
 } from "./lendingRouterActionProvider";
 import { EvmWalletProvider } from "../../wallet-providers";
 import { Network } from "../../network";
-import { COMPOUND_COMET_ADDRESSES, AAVE_POOL_ADDRESS } from "./constants";
+import {
+  COMPOUND_COMET_ADDRESSES,
+  AAVE_POOL_ADDRESS,
+  MOONWELL_MTOKEN_ADDRESSES,
+} from "./constants";
 
 const MOCK_TX_HASH = "0xmocktxhash1234567890abcdef" as `0x${string}`;
 const MOCK_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678" as `0x${string}`;
@@ -38,11 +42,6 @@ function createMockWallet(): jest.Mocked<EvmWalletProvider> {
   } as unknown as jest.Mocked<EvmWalletProvider>;
 }
 
-/**
- * Configures mock readContract responses for Compound III.
- *
- * @param wallet - The mocked wallet to configure.
- */
 const COMPOUND_COMET_ADDRESS_SET = new Set(Object.values(COMPOUND_COMET_ADDRESSES));
 
 /**
@@ -279,6 +278,18 @@ describe("LendingRouterActionProvider", () => {
         expect(parsed.lowestHealth.healthFactor).toBeDefined();
       }
     });
+
+    it("should use explicit user address when provided", async () => {
+      setupCompoundRateMocks(mockWallet);
+      setupAaveRateMocks(mockWallet);
+      fetchMock.mockResolvedValue({ ok: false, status: 500 });
+
+      const explicitUser = "0x9999999999999999999999999999999999999999";
+      const result = await provider.getAggregatedPosition(mockWallet, { user: explicitUser });
+      const parsed = JSON.parse(result);
+      expect(parsed.user).toBe(explicitUser);
+      expect(parsed.user).not.toBe(MOCK_ADDRESS);
+    });
   });
 
   describe("routeSupply", () => {
@@ -362,6 +373,31 @@ describe("LendingRouterActionProvider", () => {
         amount: "100",
       });
       expect(result).toContain("Error");
+    });
+
+    it("should supply to Moonwell when preferProtocol is moonwell", async () => {
+      const mTokenUsdc = MOONWELL_MTOKEN_ADDRESSES["usdc"];
+      const impl = mockWallet.readContract as jest.Mock;
+      const prevImpl = impl.getMockImplementation();
+      impl.mockImplementation(async (params: { address: string; functionName: string }) => {
+        if (params.address === mTokenUsdc) {
+          if (params.functionName === "supplyRatePerTimestamp") return 1000000000n;
+        }
+        if (prevImpl) return prevImpl(params);
+        return 0n;
+      });
+
+      const result = await provider.routeSupply(mockWallet, {
+        asset: "USDC",
+        amount: "100",
+        preferProtocol: "moonwell",
+      });
+      expect(result).toContain("moonwell");
+      expect(result).toContain("Supplied 100 USDC");
+      expect(mockApprove).toHaveBeenCalled();
+      expect(mockWallet.sendTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ to: mTokenUsdc }),
+      );
     });
   });
 
