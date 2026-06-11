@@ -1,8 +1,49 @@
-import { Address, encodeFunctionData, Hex } from "viem";
+import { Address, encodeFunctionData, Hex, isAddress } from "viem";
 
 import { EvmWalletProvider } from "../../../wallet-providers";
-import { BASE_MAINNET_CHAIN_ID, MORPHO_REWARDS_API_BASE, MORPHO_URD_ABI } from "../constants";
+import {
+  BASE_MAINNET_CHAIN_ID,
+  KNOWN_MORPHO_URD_ADDRESSES,
+  MORPHO_REWARDS_API_BASE,
+  MORPHO_URD_ABI,
+} from "../constants";
 import { ClaimableReward } from "../utils";
+
+/**
+ * Maps an off-chain Morpho distribution to the normalized ClaimableReward shape.
+ *
+ * @param dist - The distribution row from the rewards API.
+ * @returns The normalized claimable reward.
+ */
+function toClaimableReward(dist: MorphoDistribution): ClaimableReward {
+  return {
+    token: dist.asset.address,
+    symbol: dist.asset.symbol ?? "UNKNOWN",
+    amount: BigInt(dist.claimable),
+    decimals: dist.asset.decimals ?? 18,
+  };
+}
+
+/**
+ * Validates that an API-provided distributor address is safe to transact with:
+ * it must be a well-formed address and, when the allowlist is populated, a
+ * member of it. Prevents a spoofed API response from redirecting the claim.
+ *
+ * @param distributor - The distributor address from the API.
+ * @returns The validated distributor address.
+ */
+function assertTrustedDistributor(distributor: Address): Address {
+  if (!isAddress(distributor)) {
+    throw new Error(`Morpho rewards API returned an invalid distributor address: ${distributor}`);
+  }
+  if (
+    KNOWN_MORPHO_URD_ADDRESSES.length > 0 &&
+    !KNOWN_MORPHO_URD_ADDRESSES.some(a => a.toLowerCase() === distributor.toLowerCase())
+  ) {
+    throw new Error(`Morpho distributor ${distributor} is not in the trusted URD allowlist`);
+  }
+  return distributor;
+}
 
 /**
  * A single Morpho distribution as returned by the off-chain rewards API,
@@ -53,15 +94,17 @@ export async function fetchMorphoDistributions(account: Address): Promise<Morpho
 /**
  * Reads the total claimable Morpho reward for an account (first distribution).
  *
- * @param wallet - The wallet provider (unused; kept for adapter symmetry).
+ * Note: v1 reads only the first distribution; see claimMorpho for the same
+ * single-distribution limitation.
+ *
+ * @param _wallet - The wallet provider (unused; kept for adapter symmetry).
  * @param account - The account to read rewards for.
  * @returns The claimable reward.
  */
 export async function getMorphoClaimable(
-  wallet: EvmWalletProvider,
+  _wallet: EvmWalletProvider,
   account: Address,
 ): Promise<ClaimableReward> {
-  void wallet;
   const distributions = await fetchMorphoDistributions(account);
   if (distributions.length === 0) {
     return {
@@ -72,18 +115,16 @@ export async function getMorphoClaimable(
     };
   }
 
-  const top = distributions[0];
-  return {
-    token: top.asset.address,
-    symbol: top.asset.symbol ?? "UNKNOWN",
-    amount: BigInt(top.claimable),
-    decimals: top.asset.decimals ?? 18,
-  };
+  return toClaimableReward(distributions[0]);
 }
 
 /**
  * Claims the first available Morpho distribution for an account, fetching the
  * merkle proof from the off-chain API before submitting the on-chain claim.
+ *
+ * v1 limitation: only the first distribution is claimed. A wallet with multiple
+ * Morpho reward distributions must call this repeatedly (or use per-distribution
+ * tooling) to claim the rest.
  *
  * @param wallet - The wallet provider.
  * @param account - The account to claim rewards for.
@@ -103,22 +144,16 @@ export async function claimMorpho(
     throw new Error("Morpho rewards API returned an empty merkle proof");
   }
 
+  const distributor = assertTrustedDistributor(top.distributor.address);
+
   const data = encodeFunctionData({
     abi: MORPHO_URD_ABI,
     functionName: "claim",
     args: [account, top.asset.address, BigInt(top.claimable), top.proof],
   });
 
-  const txHash = await wallet.sendTransaction({ to: top.distributor.address, data });
+  const txHash = await wallet.sendTransaction({ to: distributor, data });
   await wallet.waitForTransactionReceipt(txHash);
 
-  return {
-    reward: {
-      token: top.asset.address,
-      symbol: top.asset.symbol ?? "UNKNOWN",
-      amount: BigInt(top.claimable),
-      decimals: top.asset.decimals ?? 18,
-    },
-    txHash,
-  };
+  return { reward: toClaimableReward(top), txHash };
 }

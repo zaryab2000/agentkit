@@ -46,6 +46,9 @@ export async function claimCompound(
   account: Address,
 ): Promise<{ reward: ClaimableReward; txHash: string }> {
   const reward = await getCompoundClaimable(wallet, account);
+  if (reward.amount <= 0n) {
+    throw new Error("nothing to claim");
+  }
 
   const data = encodeFunctionData({
     abi: COMET_REWARDS_ABI,

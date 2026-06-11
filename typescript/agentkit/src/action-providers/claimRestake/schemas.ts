@@ -6,6 +6,11 @@ import { z } from "zod";
 export const PROTOCOLS = ["compound", "moonwell", "morpho"] as const;
 
 /**
+ * Matches a 0x-prefixed 20-byte EVM address.
+ */
+const EVM_ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
+
+/**
  * Input schema for the get_claimable_rewards action.
  */
 export const GetClaimableRewardsSchema = z
@@ -17,6 +22,7 @@ export const GetClaimableRewardsSchema = z
       ),
     user: z
       .string()
+      .regex(EVM_ADDRESS_REGEX, "Invalid EVM address")
       .optional()
       .describe(
         "Optional EVM address (0x-prefixed) to check rewards for. Defaults to the connected wallet's address when omitted.",
@@ -38,6 +44,7 @@ export const ClaimRewardsSchema = z
       ),
     user: z
       .string()
+      .regex(EVM_ADDRESS_REGEX, "Invalid EVM address")
       .optional()
       .describe(
         "Optional EVM address (0x-prefixed) to claim rewards for. Defaults to the connected wallet's address when omitted.",
@@ -64,12 +71,14 @@ export const ClaimAndRestakeSchema = z
       ),
     restakeVault: z
       .string()
+      .regex(EVM_ADDRESS_REGEX, "Invalid EVM address")
       .optional()
       .describe(
         "Required when restakeTarget is 'erc4626': the 0x-prefixed address of the ERC-4626 vault to deposit into. The vault's asset() must match the token being deposited.",
       ),
     swapToAsset: z
       .string()
+      .regex(EVM_ADDRESS_REGEX, "Invalid EVM address")
       .optional()
       .describe(
         "Optional 0x-prefixed token address to swap the claimed reward into before restaking (via the in-tree 0x swap). Omit to restake the reward token as-is. Ignored if it equals the reward token.",

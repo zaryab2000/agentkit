@@ -107,6 +107,19 @@ export const MOONWELL_COMPTROLLER_ABI = [
 export const MORPHO_REWARDS_API_BASE = "https://rewards.morpho.org";
 
 /**
+ * Allowlist of trusted Morpho Universal Rewards Distributor addresses on Base.
+ * The claim target returned by the off-chain API is checked against this list
+ * before any transaction is sent, so a spoofed API response cannot redirect
+ * funds to an arbitrary contract.
+ *
+ * TODO(verify-at-build): seed with the verified Base mainnet URD address(es)
+ * from docs.morpho.org / the on-chain registry. While empty, the claim adapter
+ * still enforces that the distributor is a well-formed address but cannot
+ * cross-check it against a known-good set — populate before the upstream PR.
+ */
+export const KNOWN_MORPHO_URD_ADDRESSES: readonly Address[] = [];
+
+/**
  * Minimal Universal Rewards Distributor ABI (Merkl-style claim).
  */
 export const MORPHO_URD_ABI = [
@@ -129,7 +142,8 @@ export const MORPHO_URD_ABI = [
 // ---------------------------------------------------------------------------
 
 /**
- * Minimal Comet supply ABI for the "same" restake leg.
+ * Minimal Comet ABI for the "same" restake leg: supply plus baseToken (used to
+ * guard against supplying an asset the market does not accept, which reverts).
  */
 export const COMET_SUPPLY_ABI = [
   {
@@ -140,6 +154,13 @@ export const COMET_SUPPLY_ABI = [
     name: "supply",
     outputs: [],
     stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "baseToken",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
     type: "function",
   },
 ] as const;

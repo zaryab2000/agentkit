@@ -1,11 +1,22 @@
 import { claimRestakeActionProvider } from "./claimRestakeActionProvider";
 import { EvmWalletProvider } from "../../wallet-providers";
-import { COMET_REWARDS_ADDRESS, MOONWELL_COMPTROLLER_ADDRESS } from "./constants";
+import {
+  COMET_REWARDS_ADDRESS,
+  COMPOUND_COMET_ADDRESS,
+  MOONWELL_COMPTROLLER_ADDRESS,
+} from "./constants";
 
 const WALLET_ADDRESS = "0x1111111111111111111111111111111111111111";
 const REWARD_TOKEN = "0x2222222222222222222222222222222222222222";
 const VAULT_ADDRESS = "0x3333333333333333333333333333333333333333";
 const MORPHO_DISTRIBUTOR = "0x4444444444444444444444444444444444444444";
+const TARGET_TOKEN = "0x5555555555555555555555555555555555555555";
+
+// Mock the in-tree 0x provider so the swap leg is deterministic and needs no key.
+const mockExecuteSwap = jest.fn();
+jest.mock("../zeroX/zeroXActionProvider", () => ({
+  ZeroXActionProvider: jest.fn().mockImplementation(() => ({ executeSwap: mockExecuteSwap })),
+}));
 
 /**
  * Builds a mocked EvmWalletProvider for the claim-restake tests.
@@ -15,6 +26,7 @@ const MORPHO_DISTRIBUTOR = "0x4444444444444444444444444444444444444444";
  * @param overrides.assetReturn - The ERC-4626 asset() return value.
  * @param overrides.simulateOwed - The CometRewards owed amount.
  * @param overrides.decimals - The token decimals.
+ * @param overrides.baseTokenReturn - The Comet baseToken() return value.
  * @returns A mocked wallet provider and its key jest mocks.
  */
 function makeWallet(overrides?: {
@@ -22,6 +34,7 @@ function makeWallet(overrides?: {
   assetReturn?: string;
   simulateOwed?: bigint;
   decimals?: number;
+  baseTokenReturn?: string;
 }) {
   const balanceQueue = [...(overrides?.balanceQueue ?? [])];
   const decimals = overrides?.decimals ?? 18;
@@ -39,6 +52,10 @@ function makeWallet(overrides?: {
         return "RWD";
       case "asset":
         return overrides?.assetReturn ?? REWARD_TOKEN;
+      case "baseToken":
+        return overrides?.baseTokenReturn ?? REWARD_TOKEN;
+      case "allowance":
+        return 0n;
       case "balanceOf":
         return balanceQueue.shift() ?? 0n;
       default:
@@ -71,7 +88,7 @@ function makeWallet(overrides?: {
  * @returns The jest fetch mock.
  */
 function mockFetch(opts?: {
-  rewardPrice?: number;
+  rewardPrice?: number | null;
   ethPrice?: number;
   morphoDistributions?: unknown[];
 }) {
@@ -88,8 +105,11 @@ function mockFetch(opts?: {
         json: async () => ({ coins: { "coingecko:ethereum": { price: opts?.ethPrice ?? 3000 } } }),
       };
     }
-    // DefiLlama token price
+    // DefiLlama token price; rewardPrice === null simulates an unpriceable token.
     const key = `base:${REWARD_TOKEN}`;
+    if (opts?.rewardPrice === null) {
+      return { ok: true, json: async () => ({ coins: {} }) };
+    }
     return {
       ok: true,
       json: async () => ({ coins: { [key]: { price: opts?.rewardPrice ?? 5 } } }),
@@ -104,6 +124,7 @@ describe("ClaimRestakeActionProvider", () => {
 
   beforeEach(() => {
     jest.restoreAllMocks();
+    mockExecuteSwap.mockReset();
   });
 
   describe("supportsNetwork", () => {
@@ -218,14 +239,25 @@ describe("ClaimRestakeActionProvider", () => {
       expect(sendTransaction).not.toHaveBeenCalled();
     });
 
-    it("claims Moonwell rewards via the comptroller", async () => {
-      const { wallet, sendTransaction } = makeWallet();
+    it("claims Moonwell rewards via the comptroller and reports the realized amount", async () => {
+      const { wallet, sendTransaction } = makeWallet({
+        balanceQueue: [10n * 10n ** 18n, 30n * 10n ** 18n], // WELL before, after claim
+      });
       const parsed = JSON.parse(await provider.claimRewards(wallet, { protocol: "moonwell" }));
 
       expect(sendTransaction).toHaveBeenCalledWith(
         expect.objectContaining({ to: MOONWELL_COMPTROLLER_ADDRESS }),
       );
       expect(parsed.success).toBe(true);
+      expect(parsed.amount).toBe("20"); // 30 - 10 WELL delta
+    });
+
+    it("does not send a Compound claim tx when nothing is owed", async () => {
+      const { wallet, sendTransaction } = makeWallet({ simulateOwed: 0n });
+      const result = await provider.claimRewards(wallet, { protocol: "compound" });
+
+      expect(result).toContain("nothing to claim");
+      expect(sendTransaction).not.toHaveBeenCalled();
     });
   });
 
@@ -306,6 +338,115 @@ describe("ClaimRestakeActionProvider", () => {
       );
 
       expect(parsed.claimedNothing).toBe(true);
+    });
+
+    it("restakes 'same' into Compound when the reward is the base asset", async () => {
+      mockFetch({ rewardPrice: 5 });
+      const { wallet, sendTransaction } = makeWallet({
+        simulateOwed: 100n * 10n ** 18n,
+        balanceQueue: [0n, 100n * 10n ** 18n],
+        baseTokenReturn: REWARD_TOKEN, // reward == Comet base asset
+      });
+
+      const parsed = JSON.parse(
+        await provider.claimAndRestake(wallet, {
+          protocol: "compound",
+          restakeTarget: "same",
+        }),
+      );
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.restake.target).toBe("same");
+      // supply leg targets the Comet market
+      expect(sendTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ to: COMPOUND_COMET_ADDRESS }),
+      );
+    });
+
+    it("rejects 'same' restake when the reward is not the Compound base asset", async () => {
+      mockFetch({ rewardPrice: 5 });
+      const { wallet } = makeWallet({
+        simulateOwed: 100n * 10n ** 18n,
+        balanceQueue: [0n, 100n * 10n ** 18n],
+        baseTokenReturn: "0x9999999999999999999999999999999999999999", // base != reward
+      });
+
+      const parsed = JSON.parse(
+        await provider.claimAndRestake(wallet, {
+          protocol: "compound",
+          restakeTarget: "same",
+        }),
+      );
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.recoverable).toBe(true);
+      expect(parsed.message).toContain("requires the base asset");
+    });
+
+    it("treats a 0x JSON swap failure as a recoverable state", async () => {
+      mockFetch({ rewardPrice: 5 });
+      mockExecuteSwap.mockResolvedValue(
+        JSON.stringify({ success: false, error: "no liquidity available" }),
+      );
+      const { wallet } = makeWallet({
+        simulateOwed: 100n * 10n ** 18n,
+        balanceQueue: [0n, 100n * 10n ** 18n, 0n], // before/after claim, before swap
+      });
+
+      const parsed = JSON.parse(
+        await provider.claimAndRestake(wallet, {
+          protocol: "compound",
+          restakeTarget: "erc4626",
+          restakeVault: VAULT_ADDRESS,
+          swapToAsset: TARGET_TOKEN,
+        }),
+      );
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.recoverable).toBe(true);
+      expect(parsed.message).toContain("swap failed");
+    });
+
+    it("swaps then restakes into ERC-4626 on a successful swap", async () => {
+      mockFetch({ rewardPrice: 5 });
+      mockExecuteSwap.mockResolvedValue(JSON.stringify({ success: true }));
+      const { wallet, sendTransaction } = makeWallet({
+        simulateOwed: 100n * 10n ** 18n,
+        // before/after claim (reward), before/after swap (target)
+        balanceQueue: [0n, 100n * 10n ** 18n, 0n, 50n * 10n ** 18n],
+        assetReturn: TARGET_TOKEN, // ERC-4626 asset matches swapped token
+      });
+
+      const parsed = JSON.parse(
+        await provider.claimAndRestake(wallet, {
+          protocol: "compound",
+          restakeTarget: "erc4626",
+          restakeVault: VAULT_ADDRESS,
+          swapToAsset: TARGET_TOKEN,
+        }),
+      );
+
+      expect(mockExecuteSwap).toHaveBeenCalled();
+      expect(parsed.success).toBe(true);
+      expect(parsed.restake.token).toBe(TARGET_TOKEN);
+      expect(sendTransaction).toHaveBeenCalledWith(expect.objectContaining({ to: VAULT_ADDRESS }));
+    });
+
+    it("skips when the reward cannot be priced and a minRewardUsd floor is set", async () => {
+      mockFetch({ rewardPrice: null }); // DefiLlama returns no price
+      const { wallet, sendTransaction } = makeWallet({ simulateOwed: 100n * 10n ** 18n });
+
+      const parsed = JSON.parse(
+        await provider.claimAndRestake(wallet, {
+          protocol: "compound",
+          restakeTarget: "same",
+          minRewardUsd: 50,
+        }),
+      );
+
+      expect(parsed.skipped).toBe(true);
+      expect(parsed.gate.reason).toContain("could not be priced");
+      expect(sendTransaction).not.toHaveBeenCalled();
     });
   });
 });

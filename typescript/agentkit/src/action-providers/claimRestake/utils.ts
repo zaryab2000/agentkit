@@ -177,6 +177,25 @@ export async function evaluateGate(
     gasUsd = null;
   }
 
+  // If the reward can't be priced, do not silently let it through when the
+  // caller set an explicit floor — skip so the floor is respected.
+  if (rewardUsd === null) {
+    if (minRewardUsd !== undefined) {
+      return {
+        skip: true,
+        reason: `reward could not be priced; skipping to respect minRewardUsd $${minRewardUsd.toFixed(2)}`,
+        rewardUsd: null,
+        gasUsd,
+      };
+    }
+    return {
+      skip: false,
+      reason: "reward could not be priced; no floor set",
+      rewardUsd: null,
+      gasUsd,
+    };
+  }
+
   const floor = minRewardUsd ?? 0;
   if (rewardUsd !== null && rewardUsd < floor) {
     return {
@@ -237,6 +256,22 @@ export async function restakeIntoCompound(
   token: Address,
   amount: bigint,
 ): Promise<string> {
+  // The Compound III market only earns supply yield on its base asset; supplying
+  // any other token (e.g. the raw COMP reward) reverts on-chain. Guard up front
+  // and tell the caller to swap to the base asset first.
+  const baseToken = (await wallet.readContract({
+    address: COMPOUND_COMET_ADDRESS,
+    abi: COMET_SUPPLY_ABI,
+    functionName: "baseToken",
+  })) as Address;
+
+  if (token.toLowerCase() !== baseToken.toLowerCase()) {
+    throw new Error(
+      `restakeTarget 'same' for Compound requires the base asset ${baseToken}, but got ${token}. ` +
+        `Set swapToAsset to ${baseToken} to swap the reward before restaking.`,
+    );
+  }
+
   const approval = await approve(wallet, token, COMPOUND_COMET_ADDRESS, amount);
   if (approval.startsWith("Error")) {
     throw new Error(approval);

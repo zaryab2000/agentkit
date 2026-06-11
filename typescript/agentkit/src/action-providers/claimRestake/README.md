@@ -12,7 +12,7 @@ This directory contains the `ClaimRestakeActionProvider` for compounding lending
 
 ¹ `getRewardOwed` is **non-view** (it mutates accrual state), so it is read with a `simulateContract` static call, never as a plain read.
 
-² Morpho rewards flow through a Merkl-style Universal Rewards Distributor: the **claimable amount and merkle proof are fetched off-chain** before the on-chain claim. The exact endpoint/response shape is verified at build time (see the `TODO(verify-at-build)` markers in `constants.ts` and `adapters/morphoRewards.ts`). A missing/empty proof aborts the claim cleanly.
+² Morpho rewards flow through a Merkl-style Universal Rewards Distributor: the **claimable amount and merkle proof are fetched off-chain** before the on-chain claim. The exact endpoint/response shape is verified at build time (see the `TODO(verify-at-build)` markers in `constants.ts` and `adapters/morphoRewards.ts`). A missing/empty proof aborts the claim cleanly. The API-provided distributor address is validated (well-formed, and — once `KNOWN_MORPHO_URD_ADDRESSES` is seeded — checked against the trusted allowlist) before any transaction is sent. **v1 claims only the first distribution per call.**
 
 ³ Moonwell distributes through a MultiRewardDistributor with no cheap on-chain preview, so v1 surfaces a clear limitation instead of a fabricated amount.
 
@@ -20,7 +20,7 @@ This directory contains the `ClaimRestakeActionProvider` for compounding lending
 
 To avoid colliding with the existing open Lido/Beefy staking PRs, the restake leg uses **non-colliding** targets:
 
-- **`same`** — re-supply into Compound III (`Comet.supply`). Supported for Compound in v1.
+- **`same`** — re-supply into Compound III (`Comet.supply`). Supported for Compound in v1. The token being restaked must be the Comet market's **base asset** (e.g. USDC) — supplying any other token reverts on-chain, so the provider reads `Comet.baseToken()` and rejects a mismatch up front. Set `swapToAsset` to the base asset to swap the reward first.
 - **`erc4626`** — deposit into any generic ERC-4626 vault (`deposit(assets, receiver)`), after validating that the vault's `asset()` matches the token being deposited. Use this for Morpho/Moonwell vaults.
 
 ## Actions

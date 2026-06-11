@@ -12,6 +12,7 @@ import {
   ClaimableReward,
   evaluateGate,
   getErc20Balance,
+  getErc20Decimals,
   resolveAccount,
   restakeIntoCompound,
   restakeIntoErc4626,
@@ -123,7 +124,7 @@ It takes:
 - user: (optional) the address to claim for; defaults to the connected wallet
 
 Notes:
-- For 'morpho', the merkle proof is fetched from the off-chain rewards API before the on-chain claim; a missing proof aborts cleanly.
+- For 'morpho', the merkle proof is fetched from the off-chain rewards API before the on-chain claim; a missing proof aborts cleanly. Only the first Morpho distribution is claimed per call — call again to claim additional distributions.
 - Returns JSON with the claimed token, amount (when known) and transaction hash.`,
     schema: ClaimRewardsSchema,
   })
@@ -171,7 +172,7 @@ It takes:
 Notes:
 - The gate skips dust: it requires the reward to exceed both minRewardUsd and a multiple of the estimated gas cost.
 - Legs are separate transactions; if a later leg fails the report shows what was already claimed/swapped so funds are recoverable.
-- restakeTarget 'same' is supported for Compound in v1; use 'erc4626' for Morpho/Moonwell vaults.
+- restakeTarget 'same' is supported for Compound in v1 and requires the token being restaked to be the Compound market's base asset (e.g. USDC); set swapToAsset to that base asset so the reward is swapped first. Use 'erc4626' for Morpho/Moonwell vaults.
 Returns JSON with per-leg results.`,
     schema: ClaimAndRestakeSchema,
   })
@@ -218,7 +219,9 @@ Returns JSON with per-leg results.`,
       // 4. Optional swap.
       let restakeToken = rewardToken;
       let restakeAmount = received;
-      const rewardDecimals = preview?.decimals ?? 18;
+      // Read the reward token's real decimals rather than assuming a default, so
+      // the human-readable sellAmount round-trips correctly through the 0x swap.
+      const rewardDecimals = await getErc20Decimals(walletProvider, rewardToken);
 
       if (args.swapToAsset && args.swapToAsset.toLowerCase() !== rewardToken.toLowerCase()) {
         const targetToken = args.swapToAsset as Address;
@@ -232,7 +235,16 @@ Returns JSON with per-leg results.`,
         });
         steps.swap = { from: rewardToken, to: targetToken, outcome: swapOutcome };
 
-        if (swapOutcome.startsWith("Error")) {
+        // swapReward returns either the ZeroX JSON result ({ success, ... }) or a
+        // plain "Error: ..." sentinel (missing API key). A real 0x failure is JSON
+        // with success:false, so check both forms.
+        let swapParsed: { success?: boolean } = {};
+        try {
+          swapParsed = JSON.parse(swapOutcome);
+        } catch {
+          swapParsed = { success: false };
+        }
+        if (swapOutcome.startsWith("Error") || swapParsed.success === false) {
           return JSON.stringify({
             success: false,
             recoverable: true,
