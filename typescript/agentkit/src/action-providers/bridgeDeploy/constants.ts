@@ -26,20 +26,10 @@ export const BASE_COMET_USDC = "0xb125E6687d4313864e53df431d5425969c15Eb2F";
 
 /**
  * Minimal ABI for supplying collateral into a Compound III (Comet) market.
- * `supply` credits `msg.sender`'s own position; `supplyTo` credits an explicit
- * recipient, so it is used whenever the position owner differs from the sender.
+ * `supplyTo` credits an explicit recipient (rather than `msg.sender`), so the
+ * position can be owned by the configured recipient.
  */
 export const COMET_SUPPLY_ABI = [
-  {
-    inputs: [
-      { name: "asset", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    name: "supply",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
   {
     inputs: [
       { name: "dst", type: "address" },
