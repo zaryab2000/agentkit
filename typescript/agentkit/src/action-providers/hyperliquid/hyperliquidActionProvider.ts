@@ -83,10 +83,20 @@ Prices are start-of-block snapshots. Invalid indices are rejected before any on-
 
       const client = walletProvider.getPublicClient();
 
-      // Each index is an independent set of eth_calls; run them in parallel.
+      // Each index is independent, and within an index the asset-info and price reads are too —
+      // fan everything out so a batch of N markets is ~1 round-trip of wall time.
       const markets = await Promise.all(
         indices.map(async index => {
-          const info = await readPerpAssetInfo(client, index);
+          const [info, pxPair] = await Promise.all([
+            readPerpAssetInfo(client, index),
+            args.includePrices
+              ? Promise.all([
+                  readPx(client, PRECOMPILE_MARK_PX, index),
+                  readPx(client, PRECOMPILE_ORACLE_PX, index),
+                ])
+              : Promise.resolve(null),
+          ]);
+
           const market: Record<string, unknown> = {
             index,
             coin: info.coin,
@@ -96,11 +106,8 @@ Prices are start-of-block snapshots. Invalid indices are rejected before any on-
             marginTableId: info.marginTableId,
           };
 
-          if (args.includePrices) {
-            const [markPx, oraclePx] = await Promise.all([
-              readPx(client, PRECOMPILE_MARK_PX, index),
-              readPx(client, PRECOMPILE_ORACLE_PX, index),
-            ]);
+          if (pxPair) {
+            const [markPx, oraclePx] = pxPair;
             market.markPx = convertPx(markPx, info.szDecimals);
             market.oraclePx = convertPx(oraclePx, info.szDecimals);
           }
@@ -130,7 +137,8 @@ Inputs:
 - user: optional EVM address (defaults to the agent wallet).
 - perpIndices: REQUIRED array of perp asset indices (uint16), e.g. [0, 1].
 
-Returns JSON: { success, user, positions: [{ index, szi, size, isLong, leverage, isIsolated, entryNotional, avgEntryPx, markPx, unrealizedPnl }] }.
+Returns JSON: { success, user, positions: [{ index, szi, size, isLong, leverage, isIsolated, isolatedRawUsd, entryNotional, avgEntryPx, markPx, unrealizedPnl }] }.
+- isolatedRawUsd is the raw int64 isolated collateral (HyperCore USD * 1e6), only meaningful when isIsolated is true; all other numeric fields are human-readable decimal strings.
 Reads are start-of-block snapshots; a position just submitted via open_position may not be visible yet.`,
     schema: GetPositionsSchema,
   })

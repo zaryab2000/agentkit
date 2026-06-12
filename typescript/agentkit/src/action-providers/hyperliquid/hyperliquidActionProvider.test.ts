@@ -298,6 +298,38 @@ describe("HyperliquidActionProvider", () => {
       });
     });
 
+    it("surfaces isolatedRawUsd for an isolated position", async () => {
+      callMock
+        .mockResolvedValueOnce({
+          data: encodePosition({
+            szi: 150n,
+            entryNtl: 45_000_000n,
+            isolatedRawUsd: 5_000_000n,
+            leverage: 5,
+            isIsolated: true,
+          }),
+        })
+        .mockResolvedValueOnce({
+          data: encodePerpAssetInfo({
+            coin: "BTC",
+            marginTableId: 1,
+            szDecimals: 2,
+            maxLeverage: 50,
+            onlyIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({ data: encodePx(320000n) });
+
+      const result = JSON.parse(
+        await actionProvider.getPositions(mockWallet, { perpIndices: [0] }),
+      );
+
+      expect(result.positions[0]).toMatchObject({
+        isIsolated: true,
+        isolatedRawUsd: "5000000",
+      });
+    });
+
     it("uses the provided user address when supplied", async () => {
       const otherUser = "0x2222222222222222222222222222222222222222";
       callMock
