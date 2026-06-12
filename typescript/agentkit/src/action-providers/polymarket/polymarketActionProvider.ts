@@ -233,7 +233,7 @@ It takes the following inputs:
 - side: "BUY" or "SELL"
 - price: Limit price per share between 0 and 1 (e.g. 0.62 = 62 cents)
 - size: Number of outcome shares to trade
-- orderType: (Optional) "GTC" (default), "GTD", "FOK", or "FAK"
+- orderType: (Optional) "GTC" (default), "FOK", or "FAK"
 - negRisk: (Optional) Set true for negative-risk markets (see get_market)
 
 Important notes:
@@ -262,6 +262,9 @@ Important notes:
       // Build the signed order struct.
       const maker = walletProvider.getAddress();
       const salt = generateOrderSalt();
+      // Order struct timestamp is in MILLISECONDS, matching Polymarket's
+      // py-clob-client-v2 (time.time_ns() // 1_000_000). This is a distinct field
+      // from the L1 ClobAuth timestamp (seconds) used in buildL1Headers.
       const timestamp = Date.now().toString();
       const message = {
         salt,

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { polymarketActionProvider } from "./polymarketActionProvider";
 import { buildPolyHmacSignature, scaleAmounts } from "./utils";
 import { EvmWalletProvider } from "../../wallet-providers";
@@ -67,11 +68,24 @@ describe("PolymarketActionProvider", () => {
   });
 
   describe("buildPolyHmacSignature", () => {
-    it("produces a stable url-safe base64 signature (not hex)", () => {
+    it("matches Polymarket clob-client: url-safe base64 with '=' padding retained", () => {
       const secret = Buffer.from("supersecretkey-test").toString("base64url");
       const sig = buildPolyHmacSignature(secret, "1700000000", "POST", "/order", '{"a":1}');
-      // url-safe base64 never contains + or /
+
+      // url-safe base64 never contains + or / ...
       expect(sig).not.toMatch(/[+/]/);
+
+      // ... but Polymarket's clob-client intentionally KEEPS the trailing "="
+      // padding ("keep base64 '=' suffix"), so we do NOT use digest("base64url").
+      // Reference vector mirrors clob-client's algorithm exactly.
+      const expected = crypto
+        .createHmac("sha256", Buffer.from(secret, "base64url"))
+        .update("1700000000POST/order" + '{"a":1}')
+        .digest("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+      expect(sig).toEqual(expected);
+
       // deterministic for the same inputs
       expect(buildPolyHmacSignature(secret, "1700000000", "POST", "/order", '{"a":1}')).toEqual(
         sig,

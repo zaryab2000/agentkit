@@ -70,10 +70,10 @@ export const PlaceOrderSchema = z
       .describe("Limit price per share between 0 and 1 (e.g. 0.62 = 62 cents)"),
     size: z.number().positive().describe("Number of outcome shares to trade (whole-share units)"),
     orderType: z
-      .enum(["GTC", "GTD", "FOK", "FAK"])
+      .enum(["GTC", "FOK", "FAK"])
       .default("GTC")
       .describe(
-        'Order type: "GTC" (good-til-cancelled, default), "GTD" (good-til-date), "FOK" (fill-or-kill), "FAK" (fill-and-kill)',
+        'Order type: "GTC" (good-til-cancelled, default), "FOK" (fill-or-kill), "FAK" (fill-and-kill)',
       ),
     negRisk: z
       .boolean()
