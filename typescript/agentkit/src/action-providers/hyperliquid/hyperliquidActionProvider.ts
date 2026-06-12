@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { Hex } from "viem";
+import { encodeFunctionData, Hex } from "viem";
 import { ActionProvider } from "../actionProvider";
 import { CreateAction } from "../actionDecorator";
 import { EvmWalletProvider } from "../../wallet-providers";
 import { Network } from "../../network";
 import {
   ASYNC_SETTLEMENT_NOTE,
+  CORE_WRITER_ABI,
   CORE_WRITER_ADDRESS,
   HYPEREVM_MAINNET_CHAIN_ID,
   HYPEREVM_TESTNET_CHAIN_ID,
@@ -23,14 +24,15 @@ import {
   assertAddress,
   assertUintInRange,
   computePosition,
-  type ComputedPosition,
   convertPx,
   encodeLimitOrder,
+  fullCloseSizeU64,
   humanToScaledU64,
   parseCloid,
   readPerpAssetInfo,
   readPerpPosition,
   readPx,
+  scaledU64ToHuman,
   toEncodedTif,
 } from "./utils";
 
@@ -80,28 +82,32 @@ Prices are start-of-block snapshots. Invalid indices are rejected before any on-
       }
 
       const client = walletProvider.getPublicClient();
-      const markets: Record<string, unknown>[] = [];
 
-      for (const index of indices) {
-        const info = await readPerpAssetInfo(client, index);
-        const market: Record<string, unknown> = {
-          index,
-          coin: info.coin,
-          szDecimals: info.szDecimals,
-          maxLeverage: info.maxLeverage,
-          onlyIsolated: info.onlyIsolated,
-          marginTableId: info.marginTableId,
-        };
+      // Each index is an independent set of eth_calls; run them in parallel.
+      const markets = await Promise.all(
+        indices.map(async index => {
+          const info = await readPerpAssetInfo(client, index);
+          const market: Record<string, unknown> = {
+            index,
+            coin: info.coin,
+            szDecimals: info.szDecimals,
+            maxLeverage: info.maxLeverage,
+            onlyIsolated: info.onlyIsolated,
+            marginTableId: info.marginTableId,
+          };
 
-        if (args.includePrices) {
-          const markPx = await readPx(client, PRECOMPILE_MARK_PX, index);
-          const oraclePx = await readPx(client, PRECOMPILE_ORACLE_PX, index);
-          market.markPx = convertPx(markPx, info.szDecimals);
-          market.oraclePx = convertPx(oraclePx, info.szDecimals);
-        }
+          if (args.includePrices) {
+            const [markPx, oraclePx] = await Promise.all([
+              readPx(client, PRECOMPILE_MARK_PX, index),
+              readPx(client, PRECOMPILE_ORACLE_PX, index),
+            ]);
+            market.markPx = convertPx(markPx, info.szDecimals);
+            market.oraclePx = convertPx(oraclePx, info.szDecimals);
+          }
 
-        markets.push(market);
-      }
+          return market;
+        }),
+      );
 
       return JSON.stringify({ success: true, markets });
     } catch (error) {
@@ -142,14 +148,18 @@ Reads are start-of-block snapshots; a position just submitted via open_position 
       }
 
       const client = walletProvider.getPublicClient();
-      const positions: ComputedPosition[] = [];
 
-      for (const index of indices) {
-        const raw = await readPerpPosition(client, user as Hex, index);
-        const info = await readPerpAssetInfo(client, index);
-        const markPx = await readPx(client, PRECOMPILE_MARK_PX, index);
-        positions.push(computePosition(index, raw, markPx, info.szDecimals));
-      }
+      // Reads for each index are independent; run them in parallel.
+      const positions = await Promise.all(
+        indices.map(async index => {
+          const [raw, info, markPx] = await Promise.all([
+            readPerpPosition(client, user as Hex, index),
+            readPerpAssetInfo(client, index),
+            readPx(client, PRECOMPILE_MARK_PX, index),
+          ]);
+          return computePosition(index, raw, markPx, info.szDecimals);
+        }),
+      );
 
       return JSON.stringify({ success: true, user, positions });
     } catch (error) {
@@ -193,7 +203,7 @@ Returns JSON: { success, status: "submitted", txHash, note }.`,
       const encodedTif = toEncodedTif(args.tif);
       const cloidU128 = parseCloid(args.cloid);
 
-      const data = encodeLimitOrder(
+      const actionBytes = encodeLimitOrder(
         args.asset,
         args.isBuy,
         limitPxU64,
@@ -203,8 +213,7 @@ Returns JSON: { success, status: "submitted", txHash, note }.`,
         cloidU128,
       );
 
-      const txHash = await walletProvider.sendTransaction({ to: CORE_WRITER_ADDRESS, data });
-      await walletProvider.waitForTransactionReceipt(txHash);
+      const txHash = await this.sendRawAction(walletProvider, actionBytes);
 
       return JSON.stringify({
         success: true,
@@ -249,6 +258,7 @@ Returns JSON: { success, status: "submitted", txHash, closedSize, side, note }.`
       const user = walletProvider.getAddress();
       const client = walletProvider.getPublicClient();
 
+      // Read the position first so a no-op close short-circuits before any further reads.
       const raw = await readPerpPosition(client, user as Hex, args.asset);
       if (raw.szi === 0n) {
         return JSON.stringify({
@@ -257,36 +267,42 @@ Returns JSON: { success, status: "submitted", txHash, closedSize, side, note }.`
         });
       }
 
-      const info = await readPerpAssetInfo(client, args.asset);
-      const markPxRaw = await readPx(client, PRECOMPILE_MARK_PX, args.asset);
+      const [info, markPxRaw] = await Promise.all([
+        readPerpAssetInfo(client, args.asset),
+        readPx(client, PRECOMPILE_MARK_PX, args.asset),
+      ]);
+
       const markHuman = Number(convertPx(markPxRaw, info.szDecimals));
 
       const positionIsLong = raw.szi > 0n;
       const isBuy = !positionIsLong; // closing a long sells; closing a short buys
-      const positionSize = Math.abs(Number(raw.szi)) / 10 ** info.szDecimals;
-      const closeSize = args.size != null ? Math.min(args.size, positionSize) : positionSize;
+
+      // Compute close size in scaled uint64 with bigint-safe math, then clamp a requested size to
+      // the full position size (never close more than is open).
+      const fullCloseU64 = fullCloseSizeU64(raw.szi, info.szDecimals);
+      const requestedU64 = args.size != null ? humanToScaledU64(args.size) : fullCloseU64;
+      const closeU64 = requestedU64 < fullCloseU64 ? requestedU64 : fullCloseU64;
 
       const slip = args.slippageBps / 10000;
       const limitPxHuman = isBuy ? markHuman * (1 + slip) : markHuman * (1 - slip);
 
-      const data = encodeLimitOrder(
+      const actionBytes = encodeLimitOrder(
         args.asset,
         isBuy,
         humanToScaledU64(limitPxHuman),
-        humanToScaledU64(closeSize),
+        closeU64,
         true,
         TIF_ENCODING.Ioc,
         parseCloid(args.cloid),
       );
 
-      const txHash = await walletProvider.sendTransaction({ to: CORE_WRITER_ADDRESS, data });
-      await walletProvider.waitForTransactionReceipt(txHash);
+      const txHash = await this.sendRawAction(walletProvider, actionBytes);
 
       return JSON.stringify({
         success: true,
         status: "submitted",
         txHash,
-        closedSize: closeSize.toString(),
+        closedSize: scaledU64ToHuman(closeU64),
         side: isBuy ? "buy" : "sell",
         note: `${ASYNC_SETTLEMENT_NOTE} The position size was read from a start-of-block snapshot and may have changed.`,
       });
@@ -305,6 +321,27 @@ Returns JSON: { success, status: "submitted", txHash, closedSize, side, note }.`
     network.protocolFamily === "evm" &&
     (network.chainId === HYPEREVM_MAINNET_CHAIN_ID ||
       network.chainId === HYPEREVM_TESTNET_CHAIN_ID);
+
+  /**
+   * Wraps encoded CoreWriter action bytes in a sendRawAction(bytes) call and submits it.
+   *
+   * @param walletProvider - The wallet provider used to send the transaction.
+   * @param actionBytes - The encoded action (version + action id + ABI-encoded payload).
+   * @returns The transaction hash.
+   */
+  private async sendRawAction(
+    walletProvider: EvmWalletProvider,
+    actionBytes: Hex,
+  ): Promise<`0x${string}`> {
+    const data = encodeFunctionData({
+      abi: CORE_WRITER_ABI,
+      functionName: "sendRawAction",
+      args: [actionBytes],
+    });
+    const txHash = await walletProvider.sendTransaction({ to: CORE_WRITER_ADDRESS, data });
+    await walletProvider.waitForTransactionReceipt(txHash);
+    return txHash;
+  }
 }
 
 /**

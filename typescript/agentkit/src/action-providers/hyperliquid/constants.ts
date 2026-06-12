@@ -14,10 +14,18 @@ export const HYPEREVM_MAINNET_CHAIN_ID = "999";
 /** HyperEVM testnet chain id. */
 export const HYPEREVM_TESTNET_CHAIN_ID = "998";
 
-/** HyperEVM mainnet JSON-RPC endpoint (documentation; the wallet provider supplies the client). */
+/**
+ * HyperEVM mainnet JSON-RPC endpoint. Reference only — the wallet provider supplies the client.
+ *
+ * @internal
+ */
 export const HYPEREVM_MAINNET_RPC_URL = "https://rpc.hyperliquid.xyz/evm";
 
-/** HyperEVM testnet JSON-RPC endpoint. */
+/**
+ * HyperEVM testnet JSON-RPC endpoint. Reference only — the wallet provider supplies the client.
+ *
+ * @internal
+ */
 export const HYPEREVM_TESTNET_RPC_URL = "https://rpc.hyperliquid-testnet.xyz/evm";
 
 // --- HyperCore read precompiles (HyperEVM -> HyperCore reads) -----------------------------------
@@ -36,8 +44,24 @@ export const PRECOMPILE_PERP_ASSET_INFO = "0x00000000000000000000000000000000000
 
 // --- CoreWriter (HyperEVM -> HyperCore writes) --------------------------------------------------
 
-/** CoreWriter system contract. Entry point: sendRawAction(bytes). */
+/**
+ * CoreWriter system contract. Its sole entry point is the Solidity function
+ * `sendRawAction(bytes data)` (there is no fallback), so writes must be sent as a normal ABI
+ * function call (selector + ABI-encoded `bytes` argument), not as bare action bytes. The action
+ * bytes (version + action id + payload) are the ARGUMENT to that function.
+ */
 export const CORE_WRITER_ADDRESS = "0x3333333333333333333333333333333333333333" as Hex;
+
+/** Minimal ABI for the CoreWriter entry point. */
+export const CORE_WRITER_ABI = [
+  {
+    type: "function",
+    name: "sendRawAction",
+    inputs: [{ name: "data", type: "bytes" }],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
 
 /**
  * CoreWriter action header for a limit order: version byte 0x01 followed by the 3-byte big-endian

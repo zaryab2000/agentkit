@@ -1,16 +1,58 @@
-import { encodeAbiParameters } from "viem";
+import { encodeAbiParameters, encodeFunctionData, type AbiParameter } from "viem";
 import { hyperliquidActionProvider } from "./hyperliquidActionProvider";
 import { EvmWalletProvider } from "../../wallet-providers";
 import {
+  CORE_WRITER_ABI,
   CORE_WRITER_ADDRESS,
   LIMIT_ORDER_ACTION_HEADER,
   PERP_ASSET_INFO_RETURN,
+  PRECOMPILE_MARK_PX,
+  PRECOMPILE_ORACLE_PX,
+  PRECOMPILE_PERP_ASSET_INFO,
   POSITION_RETURN,
   UINT64_RETURN,
 } from "./constants";
 import { PerpAssetInfo, RawPosition } from "./utils";
 
 const MOCK_ADDRESS = "0x1111111111111111111111111111111111111111";
+
+const LIMIT_ORDER_TYPES: readonly AbiParameter[] = [
+  { type: "uint32" },
+  { type: "bool" },
+  { type: "uint64" },
+  { type: "uint64" },
+  { type: "bool" },
+  { type: "uint8" },
+  { type: "uint128" },
+];
+
+/**
+ * Builds the exact CoreWriter calldata for a limit order: a sendRawAction(bytes) call whose
+ * argument is the encoded action (header + ABI-encoded payload).
+ *
+ * @param payload - the limit-order payload tuple values
+ * @returns the expected transaction calldata
+ */
+function expectedOrderCalldata(payload: readonly unknown[]) {
+  const actionBytes = (LIMIT_ORDER_ACTION_HEADER +
+    encodeAbiParameters(LIMIT_ORDER_TYPES, payload).slice(2)) as `0x${string}`;
+  return encodeFunctionData({
+    abi: CORE_WRITER_ABI,
+    functionName: "sendRawAction",
+    args: [actionBytes],
+  });
+}
+
+/**
+ * Decodes the trailing 32-byte word of precompile calldata as an integer index.
+ *
+ * @param data - the abi-encoded precompile input
+ * @returns the index value
+ */
+function indexFromCalldata(data: string): number {
+  const words = data.slice(2).match(/.{64}/g) ?? [];
+  return Number(BigInt("0x" + words[words.length - 1]));
+}
 
 /**
  * Encodes a PerpAssetInfo struct as a precompile would return it.
@@ -138,6 +180,42 @@ describe("HyperliquidActionProvider", () => {
       expect(result.success).toBe(false);
       expect(callMock).not.toHaveBeenCalled();
     });
+
+    it("deduplicates indices and returns one entry per unique market", async () => {
+      const infoByIndex: Record<number, PerpAssetInfo> = {
+        0: { coin: "BTC", marginTableId: 1, szDecimals: 2, maxLeverage: 50, onlyIsolated: false },
+        1: { coin: "ETH", marginTableId: 2, szDecimals: 2, maxLeverage: 25, onlyIsolated: false },
+      };
+      const markByIndex: Record<number, bigint> = { 0: 300000n, 1: 400000n };
+      const oracleByIndex: Record<number, bigint> = { 0: 305000n, 1: 405000n };
+
+      callMock.mockImplementation(async ({ to, data }: { to: string; data: string }) => {
+        const index = indexFromCalldata(data);
+        if (to === PRECOMPILE_PERP_ASSET_INFO) {
+          return { data: encodePerpAssetInfo(infoByIndex[index]) };
+        }
+        if (to === PRECOMPILE_MARK_PX) {
+          return { data: encodePx(markByIndex[index]) };
+        }
+        if (to === PRECOMPILE_ORACLE_PX) {
+          return { data: encodePx(oracleByIndex[index]) };
+        }
+        throw new Error(`unexpected precompile ${to}`);
+      });
+
+      const result = JSON.parse(
+        await actionProvider.getMarkets(mockWallet, { indices: [0, 1, 0], includePrices: true }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.markets).toHaveLength(2);
+      const byIndex = Object.fromEntries(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        result.markets.map((m: any) => [m.index, m]),
+      );
+      expect(byIndex[0]).toMatchObject({ coin: "BTC", markPx: "30", oraclePx: "30.5" });
+      expect(byIndex[1]).toMatchObject({ coin: "ETH", markPx: "40", oraclePx: "40.5" });
+    });
   });
 
   describe("get_positions", () => {
@@ -264,29 +342,15 @@ describe("HyperliquidActionProvider", () => {
         }),
       );
 
-      // Expected calldata = header (0x01000001) + abi.encode(1, true, 1e8, 1e8, false, 3, 0).
-      const expectedData =
-        LIMIT_ORDER_ACTION_HEADER +
-        encodeAbiParameters(
-          [
-            { type: "uint32" },
-            { type: "bool" },
-            { type: "uint64" },
-            { type: "uint64" },
-            { type: "bool" },
-            { type: "uint8" },
-            { type: "uint128" },
-          ],
-          [1, true, 100000000n, 100000000n, false, 3, 0n],
-        ).slice(2);
-
+      // Expected calldata = sendRawAction(header 0x01000001 + abi.encode(1, true, 1e8, 1e8, false, 3, 0)).
       expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
         to: CORE_WRITER_ADDRESS,
-        data: expectedData,
+        data: expectedOrderCalldata([1, true, 100000000n, 100000000n, false, 3, 0n]),
       });
-      // Non-circular anchors: header present and 1e8 (0x05f5e100) scaling appears for px and size.
+      // Non-circular anchors: the action header and 1e8 (0x05f5e100) scaling for px and size appear
+      // inside the sendRawAction bytes argument.
       const sentData: string = mockWallet.sendTransaction.mock.calls[0][0].data as string;
-      expect(sentData.startsWith("0x01000001")).toBe(true);
+      expect(sentData).toContain("01000001");
       expect(sentData.match(/05f5e100/g)).toHaveLength(2);
 
       expect(result).toMatchObject({ success: true, status: "submitted", txHash: "0xmockhash" });
@@ -322,24 +386,27 @@ describe("HyperliquidActionProvider", () => {
         cloid: "42",
       });
 
-      const expectedData =
-        LIMIT_ORDER_ACTION_HEADER +
-        encodeAbiParameters(
-          [
-            { type: "uint32" },
-            { type: "bool" },
-            { type: "uint64" },
-            { type: "uint64" },
-            { type: "bool" },
-            { type: "uint8" },
-            { type: "uint128" },
-          ],
-          [2, true, 1000000000n, 300000000n, true, 2, 42n],
-        ).slice(2);
+      // Gtc => encodedTif 2; cloid "42" => 42n.
+      expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
+        to: CORE_WRITER_ADDRESS,
+        data: expectedOrderCalldata([2, true, 1000000000n, 300000000n, true, 2, 42n]),
+      });
+    });
+
+    it("encodes the Alo time-in-force as 1", async () => {
+      await actionProvider.openPosition(mockWallet, {
+        asset: 0,
+        isBuy: true,
+        size: 1,
+        limitPx: 1,
+        tif: "Alo",
+        reduceOnly: false,
+        cloid: null,
+      });
 
       expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
         to: CORE_WRITER_ADDRESS,
-        data: expectedData,
+        data: expectedOrderCalldata([0, true, 100000000n, 100000000n, false, 1, 0n]),
       });
     });
 
@@ -392,25 +459,109 @@ describe("HyperliquidActionProvider", () => {
       expect(result.closedSize).toBe("1.5");
 
       // mark 32, sell with 5% slip => limitPx 30.4; size 1.5; reduceOnly true; Ioc(3).
-      const expectedData =
-        LIMIT_ORDER_ACTION_HEADER +
-        encodeAbiParameters(
-          [
-            { type: "uint32" },
-            { type: "bool" },
-            { type: "uint64" },
-            { type: "uint64" },
-            { type: "bool" },
-            { type: "uint8" },
-            { type: "uint128" },
-          ],
-          [0, false, 3040000000n, 150000000n, true, 3, 0n],
-        ).slice(2);
-
       expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
         to: CORE_WRITER_ADDRESS,
-        data: expectedData,
+        data: expectedOrderCalldata([0, false, 3040000000n, 150000000n, true, 3, 0n]),
       });
+    });
+
+    it("closes a short by buying with upward slippage", async () => {
+      // Short 1.5 BTC (szi negative), mark 32. Closing a short => buy at 32 * 1.05 = 33.6.
+      callMock
+        .mockResolvedValueOnce({
+          data: encodePosition({
+            szi: -150n,
+            entryNtl: 45_000_000n,
+            isolatedRawUsd: 0n,
+            leverage: 10,
+            isIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({
+          data: encodePerpAssetInfo({
+            coin: "BTC",
+            marginTableId: 1,
+            szDecimals: 2,
+            maxLeverage: 50,
+            onlyIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({ data: encodePx(320000n) });
+
+      const result = JSON.parse(
+        await actionProvider.closePosition(mockWallet, { asset: 0, slippageBps: 500 }),
+      );
+
+      expect(result).toMatchObject({ success: true, side: "buy" });
+      expect(result.closedSize).toBe("1.5");
+      expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
+        to: CORE_WRITER_ADDRESS,
+        data: expectedOrderCalldata([0, true, 3360000000n, 150000000n, true, 3, 0n]),
+      });
+    });
+
+    it("clamps a partial close to the requested size", async () => {
+      // Long 1.5, request to close 0.5 => closeSize 0.5 (50_000_000 scaled).
+      callMock
+        .mockResolvedValueOnce({
+          data: encodePosition({
+            szi: 150n,
+            entryNtl: 45_000_000n,
+            isolatedRawUsd: 0n,
+            leverage: 10,
+            isIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({
+          data: encodePerpAssetInfo({
+            coin: "BTC",
+            marginTableId: 1,
+            szDecimals: 2,
+            maxLeverage: 50,
+            onlyIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({ data: encodePx(320000n) });
+
+      const result = JSON.parse(
+        await actionProvider.closePosition(mockWallet, { asset: 0, size: 0.5, slippageBps: 500 }),
+      );
+
+      expect(result.closedSize).toBe("0.5");
+      expect(mockWallet.sendTransaction).toHaveBeenCalledWith({
+        to: CORE_WRITER_ADDRESS,
+        data: expectedOrderCalldata([0, false, 3040000000n, 50000000n, true, 3, 0n]),
+      });
+    });
+
+    it("never closes more than the open position size", async () => {
+      // Long 1.5, request 5 => clamped to full 1.5.
+      callMock
+        .mockResolvedValueOnce({
+          data: encodePosition({
+            szi: 150n,
+            entryNtl: 45_000_000n,
+            isolatedRawUsd: 0n,
+            leverage: 10,
+            isIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({
+          data: encodePerpAssetInfo({
+            coin: "BTC",
+            marginTableId: 1,
+            szDecimals: 2,
+            maxLeverage: 50,
+            onlyIsolated: false,
+          }),
+        })
+        .mockResolvedValueOnce({ data: encodePx(320000n) });
+
+      const result = JSON.parse(
+        await actionProvider.closePosition(mockWallet, { asset: 0, size: 5, slippageBps: 500 }),
+      );
+
+      expect(result.closedSize).toBe("1.5");
     });
 
     it("returns an error when there is no open position", async () => {

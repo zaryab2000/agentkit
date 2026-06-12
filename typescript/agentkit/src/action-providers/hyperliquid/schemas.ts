@@ -112,6 +112,8 @@ export const OpenPositionSchema = z
  */
 export const ClosePositionSchema = z
   .object({
+    // Bounded to uint16 (not uint32 like open_position) because close_position reads the position
+    // precompile first, whose perp argument is uint16; you can only close positions it can read.
     asset: z
       .number()
       .int()

@@ -51,6 +51,8 @@ export interface ComputedPosition {
   isLong: boolean;
   leverage: number;
   isIsolated: boolean;
+  /** Raw isolated collateral (int64, HyperCore USD * 1e6) — only meaningful when isIsolated. */
+  isolatedRawUsd: string;
   entryNotional: string;
   avgEntryPx: string | null;
   markPx: string;
@@ -178,6 +180,29 @@ export function humanToScaledU64(value: number): bigint {
 }
 
 /**
+ * Computes the exact scaled uint64 (value * 1e8) size for fully closing a position, derived from
+ * the raw signed size with bigint-safe math (avoids Number precision loss for large int64 sizes).
+ *
+ * @param szi - the raw signed position size (int64, scaled by szDecimals)
+ * @param szDecimals - the asset's size decimals
+ * @returns the absolute size scaled to uint64
+ */
+export function fullCloseSizeU64(szi: bigint, szDecimals: number): bigint {
+  const abs = szi < 0n ? -szi : szi;
+  return parseUnits(formatUnits(abs, szDecimals), PX_SIZE_SCALE_DECIMALS);
+}
+
+/**
+ * Formats a scaled uint64 (value * 1e8) back into a human-readable decimal string.
+ *
+ * @param value - the scaled uint64 value
+ * @returns the human-readable decimal string
+ */
+export function scaledU64ToHuman(value: bigint): string {
+  return formatUnits(value, PX_SIZE_SCALE_DECIMALS);
+}
+
+/**
  * Maps a time-in-force string to its CoreWriter encoding (Alo=1, Gtc=2, Ioc=3).
  *
  * @param tif - the time-in-force key
@@ -254,25 +279,30 @@ export function computePosition(
   markPxRaw: bigint,
   szDecimals: number,
 ): ComputedPosition {
-  const sizeHuman = Number(raw.szi) / 10 ** szDecimals;
-  const entryNotional = Number(raw.entryNtl) / 10 ** USD_NOTIONAL_DECIMALS;
-  const markHuman = Number(convertPx(markPxRaw, szDecimals));
+  // De-scale the raw integer fields with bigint-safe formatUnits (int64 can exceed 2^53), then
+  // parse to Number only for the derived display metrics (avgEntryPx / PnL).
+  const sizeStr = formatUnits(raw.szi, szDecimals);
+  const entryNotionalStr = formatUnits(raw.entryNtl, USD_NOTIONAL_DECIMALS);
+  const markStr = convertPx(markPxRaw, szDecimals);
+
+  const sizeHuman = Number(sizeStr);
+  const entryNotional = Number(entryNotionalStr);
+  const markHuman = Number(markStr);
   const isZero = raw.szi === 0n;
   const avgEntryPx = isZero ? null : entryNotional / Math.abs(sizeHuman);
-  const unrealizedPnl = isZero
-    ? 0
-    : sizeHuman * markHuman - Math.sign(Number(raw.szi)) * entryNotional;
+  const unrealizedPnl = isZero ? 0 : sizeHuman * markHuman - Math.sign(sizeHuman) * entryNotional;
 
   return {
     index,
     szi: raw.szi.toString(),
-    size: sizeHuman.toString(),
+    size: sizeStr,
     isLong: raw.szi > 0n,
     leverage: raw.leverage,
     isIsolated: raw.isIsolated,
-    entryNotional: entryNotional.toString(),
+    isolatedRawUsd: raw.isolatedRawUsd.toString(),
+    entryNotional: entryNotionalStr,
     avgEntryPx: avgEntryPx === null ? null : avgEntryPx.toString(),
-    markPx: markHuman.toString(),
+    markPx: markStr,
     unrealizedPnl: unrealizedPnl.toString(),
   };
 }
