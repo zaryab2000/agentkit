@@ -72,6 +72,15 @@ export function scaleAmounts(
 }
 
 /**
+ * Generates a cryptographically-secure random uint256 salt for an order.
+ *
+ * @returns The salt as a decimal string.
+ */
+export function generateOrderSalt(): string {
+  return BigInt(`0x${crypto.randomBytes(16).toString("hex")}`).toString();
+}
+
+/**
  * Computes the Polymarket L2 HMAC request signature.
  *
  * The API secret is url-safe-base64 decoded for use as the HMAC key, the

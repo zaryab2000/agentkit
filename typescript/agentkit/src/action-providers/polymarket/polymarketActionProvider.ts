@@ -37,6 +37,7 @@ import {
   buildL2Headers,
   buildQuery,
   deriveApiCreds,
+  generateOrderSalt,
   httpGetJson,
   scaleAmounts,
 } from "./utils";
@@ -260,7 +261,7 @@ Important notes:
 
       // Build the signed order struct.
       const maker = walletProvider.getAddress();
-      const salt = Math.floor(Math.random() * 1e18).toString();
+      const salt = generateOrderSalt();
       const timestamp = Date.now().toString();
       const message = {
         salt,

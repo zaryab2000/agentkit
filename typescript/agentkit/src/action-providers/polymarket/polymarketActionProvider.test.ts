@@ -265,6 +265,81 @@ describe("PolymarketActionProvider", () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain("400");
     });
+
+    it("sets ERC-1155 operator approval for a SELL when not yet approved", async () => {
+      setupCreds();
+      mockWallet.readContract.mockResolvedValueOnce(false); // isApprovedForAll => false
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ orderID: "abc" }) });
+
+      await provider.placeOrder(mockWallet, {
+        tokenId: "111",
+        side: "SELL",
+        price: 0.5,
+        size: 100,
+        orderType: "GTC",
+        negRisk: false,
+      });
+
+      expect(mockWallet.sendTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ to: CONDITIONAL_TOKENS }),
+      );
+    });
+
+    it("derives credentials only once across multiple orders (caches)", async () => {
+      // derive once, then two order POSTs
+      setupCreds();
+      mockWallet.readContract.mockResolvedValue(BigInt("1000000000"));
+      fetchMock
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ orderID: "a" }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ orderID: "b" }) });
+
+      const order = {
+        tokenId: "111",
+        side: "BUY" as const,
+        price: 0.5,
+        size: 100,
+        orderType: "GTC" as const,
+        negRisk: false,
+      };
+      await provider.placeOrder(mockWallet, order);
+      await provider.placeOrder(mockWallet, order);
+
+      const deriveCalls = fetchMock.mock.calls.filter(c =>
+        String(c[0]).includes("/auth/derive-api-key"),
+      );
+      expect(deriveCalls).toHaveLength(1);
+    });
+
+    it("falls back to POST /auth/api-key when derive fails", async () => {
+      fetchMock
+        .mockResolvedValueOnce({ ok: false, status: 404 }) // derive fails
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            apiKey: "key-1",
+            secret: Buffer.from("secret-1").toString("base64url"),
+            passphrase: "pass-1",
+          }),
+        }) // create succeeds
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ orderID: "abc" }) });
+      mockWallet.readContract.mockResolvedValueOnce(BigInt("1000000000"));
+
+      const result = JSON.parse(
+        await provider.placeOrder(mockWallet, {
+          tokenId: "111",
+          side: "BUY",
+          price: 0.5,
+          size: 100,
+          orderType: "GTC",
+          negRisk: false,
+        }),
+      );
+
+      expect(result.success).toBe(true);
+      const createCall = fetchMock.mock.calls.find(c => String(c[0]).endsWith("/auth/api-key"));
+      expect(createCall).toBeDefined();
+      expect(createCall?.[1].method).toEqual("POST");
+    });
   });
 
   describe("redeemWinnings", () => {

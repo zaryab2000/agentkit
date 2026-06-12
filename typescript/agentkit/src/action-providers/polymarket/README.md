@@ -43,6 +43,11 @@ by USDC. Ensure the wallet holds enough pUSD before placing buy orders. `place_o
 automatically sets the required token allowances (pUSD for buys, the Conditional Tokens
 operator approval for sells) when they are missing.
 
+Approvals are scoped to the **exact order amount** rather than an unbounded
+(`MAX_UINT256`) allowance. This is a deliberate security trade-off: it limits the amount
+the exchange can ever move on the wallet's behalf, at the cost of an extra approval
+transaction whenever a buy exceeds the current allowance.
+
 ## Authentication
 
 `place_order` derives Polymarket API credentials on the fly using an EIP-712 signature
